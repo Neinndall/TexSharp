@@ -86,7 +86,7 @@ namespace TexSharp
             try
             {
                 using var compressedMs = new MemoryStream();
-                using (var deflate = new DeflateStream(compressedMs, CompressionLevel.Fastest, leaveOpen: true))
+                using (var deflate = new DeflateStream(compressedMs, CompressionLevel.Optimal, leaveOpen: true))
                 {
                     for (int y = 0; y < height; y++)
                     {
