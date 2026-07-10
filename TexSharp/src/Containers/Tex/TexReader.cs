@@ -131,12 +131,22 @@ namespace TexSharp.Containers.Tex
 
         public uint[] DecodeMip(int level)
         {
+            return DecodeMip(level, Rgba16fColorMapping.Linear);
+        }
+
+        public uint[] DecodeMip(int level, Rgba16fColorMapping rgba16fMapping)
+        {
             uint[] output = new uint[GetMipPixelCount(level)];
-            DecodeMip(level, output);
+            DecodeMip(level, output, rgba16fMapping);
             return output;
         }
 
         public void DecodeMip(int level, Span<uint> output)
+        {
+            DecodeMip(level, output, Rgba16fColorMapping.Linear);
+        }
+
+        public void DecodeMip(int level, Span<uint> output, Rgba16fColorMapping rgba16fMapping)
         {
             if (level < 0 || level >= MipLevels)
                 throw new ArgumentOutOfRangeException(nameof(level));
@@ -147,7 +157,7 @@ namespace TexSharp.Containers.Tex
             int start = Math.Min(offset, _fileData.Length);
             int available = offset < _fileData.Length ? Math.Min(expectedSize, _fileData.Length - offset) : 0;
             ReadOnlySpan<byte> mipData = _fileData.AsSpan(start, available);
-            BcImageDecoder.DecodeImage(mipData, mip.Width, mip.Height, ResolvedFormat, output);
+            BcImageDecoder.DecodeImage(mipData, mip.Width, mip.Height, ResolvedFormat, output, rgba16fMapping);
         }
 
         public int GetMipPixelCount(int level)
@@ -160,9 +170,14 @@ namespace TexSharp.Containers.Tex
 
         public uint[][] DecodeAllMips()
         {
+            return DecodeAllMips(Rgba16fColorMapping.Linear);
+        }
+
+        public uint[][] DecodeAllMips(Rgba16fColorMapping rgba16fMapping)
+        {
             var result = new uint[MipLevels][];
             for (int i = 0; i < MipLevels; i++)
-                result[i] = DecodeMip(i);
+                result[i] = DecodeMip(i, rgba16fMapping);
             return result;
         }
     }

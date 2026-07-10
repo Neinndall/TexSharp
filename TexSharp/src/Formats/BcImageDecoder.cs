@@ -19,6 +19,12 @@ namespace TexSharp.Formats
         DdsBgra8
     }
 
+    public enum Rgba16fColorMapping
+    {
+        Linear,
+        SignedNormalizedOpaque
+    }
+
     public static class BcImageDecoder
     {
         public static int GetBlockSize(DecodedFormat format)
@@ -35,7 +41,8 @@ namespace TexSharp.Formats
             };
         }
 
-        public static void DecodeImage(ReadOnlySpan<byte> data, int width, int height, DecodedFormat format, Span<uint> output)
+        public static void DecodeImage(ReadOnlySpan<byte> data, int width, int height, DecodedFormat format, Span<uint> output,
+            Rgba16fColorMapping rgba16fMapping = Rgba16fColorMapping.Linear)
         {
             int pixelCount = GetPixelCount(width, height);
             if (output.Length < pixelCount)
@@ -59,7 +66,7 @@ namespace TexSharp.Formats
 
             if (format == DecodedFormat.Rgba16f)
             {
-                DecodeRgba16f(data, output, pixelCount);
+                DecodeRgba16f(data, output, pixelCount, rgba16fMapping);
                 return;
             }
 
@@ -304,16 +311,20 @@ namespace TexSharp.Formats
             return checked(width * height);
         }
 
-        private static void DecodeRgba16f(ReadOnlySpan<byte> data, Span<uint> output, int pixelCount)
+        private static void DecodeRgba16f(ReadOnlySpan<byte> data, Span<uint> output, int pixelCount,
+            Rgba16fColorMapping mapping)
         {
             ReadOnlySpan<ushort> source = MemoryMarshal.Cast<byte, ushort>(data);
             for (int i = 0; i < pixelCount; i++)
             {
                 int offset = i * 4;
-                uint r = HalfToByte(source[offset]);
-                uint g = HalfToByte(source[offset + 1]);
-                uint b = HalfToByte(source[offset + 2]);
-                uint a = HalfToByte(source[offset + 3]);
+                uint r = mapping == Rgba16fColorMapping.SignedNormalizedOpaque
+                    ? SignedHalfToByte(source[offset]) : HalfToByte(source[offset]);
+                uint g = mapping == Rgba16fColorMapping.SignedNormalizedOpaque
+                    ? SignedHalfToByte(source[offset + 1]) : HalfToByte(source[offset + 1]);
+                uint b = mapping == Rgba16fColorMapping.SignedNormalizedOpaque
+                    ? SignedHalfToByte(source[offset + 2]) : HalfToByte(source[offset + 2]);
+                uint a = mapping == Rgba16fColorMapping.SignedNormalizedOpaque ? 255u : HalfToByte(source[offset + 3]);
                 output[i] = r | (g << 8) | (b << 16) | (a << 24);
             }
         }
@@ -323,6 +334,14 @@ namespace TexSharp.Formats
             float value = (float)BitConverter.UInt16BitsToHalf(bits);
             if (!(value > 0)) return 0;
             if (value >= 1) return 255;
+            return (uint)(value * 255.0f + 0.5f);
+        }
+
+        private static uint SignedHalfToByte(ushort bits)
+        {
+            float value = (float)BitConverter.UInt16BitsToHalf(bits);
+            if (float.IsNaN(value)) return 0;
+            value = Math.Clamp(value * 0.5f + 0.5f, 0.0f, 1.0f);
             return (uint)(value * 255.0f + 0.5f);
         }
 

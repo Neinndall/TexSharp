@@ -204,6 +204,11 @@ namespace TexSharp.Tests
             BcImageDecoder.DecodeImage(pixel, 1, 1, DecodedFormat.Rgba16f, output);
             Check("RGBA16F converts Half channels to RGBA8", output[0] == 0xFF0080FFu);
 
+            byte[] signedPixel = { 0x00, 0xBC, 0x00, 0x00, 0x00, 0x3C, 0x00, 0x00 };
+            BcImageDecoder.DecodeImage(signedPixel, 1, 1, DecodedFormat.Rgba16f, output,
+                Rgba16fColorMapping.SignedNormalizedOpaque);
+            Check("RGBA16F signed preview maps -1..1 to RGB", output[0] == 0xFFFF8000u);
+
             byte[] tex = new byte[20];
             tex[0] = 0x54; tex[1] = 0x45; tex[2] = 0x58;
             tex[4] = 1; tex[6] = 1; tex[9] = (byte)TexFormat.Rgba16f;
@@ -669,6 +674,7 @@ namespace TexSharp.Tests
             }
             Console.WriteLine($"\nExported {count}/5 PNGs to {dest}");
         }
+
 
         static void CompareDetailed()
         {
