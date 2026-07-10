@@ -11,7 +11,7 @@ namespace TexSharp.Formats.BC
     {
         public static void DecodeBlock(ReadOnlySpan<byte> data, Span<uint> rgbaOutput)
         {
-            if (data.Length < 8) return;
+            if (data.Length < 8 || rgbaOutput.Length < 16) return;
 
             Span<byte> values = stackalloc byte[16];
             BcCommon.DecodeAlphaBlock(data, values);

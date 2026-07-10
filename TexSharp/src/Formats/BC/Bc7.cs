@@ -50,6 +50,9 @@ namespace TexSharp.Formats.BC
 
         public static void DecodeBlock(ReadOnlySpan<byte> data, Span<uint> rgbaOutput)
         {
+            if (rgbaOutput.Length < 16)
+                return;
+
             if (data.Length < 16)
             {
                 for (int i = 0; i < 16; i++) rgbaOutput[i] = 0;

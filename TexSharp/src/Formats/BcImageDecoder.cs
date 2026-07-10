@@ -13,7 +13,10 @@ namespace TexSharp.Formats
         Bc4,
         Bc5,
         Bc7,
-        Bgra8
+        Bgra8,
+        Rgba16f,
+        Rgba8,
+        DdsBgra8
     }
 
     public static class BcImageDecoder
@@ -25,15 +28,38 @@ namespace TexSharp.Formats
                 DecodedFormat.Bc1 or DecodedFormat.Bc4 => 8,
                 DecodedFormat.Bc2 or DecodedFormat.Bc3 or DecodedFormat.Bc5 or DecodedFormat.Bc7 => 16,
                 DecodedFormat.Bgra8 => 0,
+                DecodedFormat.Rgba16f => 0,
+                DecodedFormat.Rgba8 => 0,
+                DecodedFormat.DdsBgra8 => 0,
                 _ => 0
             };
         }
 
         public static void DecodeImage(ReadOnlySpan<byte> data, int width, int height, DecodedFormat format, Span<uint> output)
         {
-            if (format == DecodedFormat.Bgra8)
+            int pixelCount = GetPixelCount(width, height);
+            if (output.Length < pixelCount)
+                throw new ArgumentException("The output buffer is smaller than the decoded image.", nameof(output));
+
+            int dataSize = MipSize(width, height, format);
+            if (data.Length < dataSize)
+                return;
+
+            if (format is DecodedFormat.Bgra8 or DecodedFormat.Rgba8)
             {
-                MemoryMarshal.Cast<byte, uint>(data).CopyTo(output);
+                MemoryMarshal.Cast<byte, uint>(data.Slice(0, dataSize)).CopyTo(output);
+                return;
+            }
+
+            if (format == DecodedFormat.DdsBgra8)
+            {
+                DecodeDdsBgra8(data, output, pixelCount);
+                return;
+            }
+
+            if (format == DecodedFormat.Rgba16f)
+            {
+                DecodeRgba16f(data, output, pixelCount);
                 return;
             }
 
@@ -259,10 +285,57 @@ namespace TexSharp.Formats
 
         public static int MipSize(int width, int height, DecodedFormat format)
         {
-            if (format == DecodedFormat.Bgra8) return width * height * 4;
+            int pixelCount = GetPixelCount(width, height);
+            if (format is DecodedFormat.Bgra8 or DecodedFormat.Rgba8 or DecodedFormat.DdsBgra8)
+                return checked(pixelCount * 4);
+            if (format == DecodedFormat.Rgba16f) return checked(pixelCount * 8);
             int blocksX = (width + 3) / 4;
             int blocksY = (height + 3) / 4;
-            return blocksX * blocksY * GetBlockSize(format);
+            return checked(blocksX * blocksY * GetBlockSize(format));
+        }
+
+        private static int GetPixelCount(int width, int height)
+        {
+            if (width <= 0)
+                throw new ArgumentOutOfRangeException(nameof(width), "Image width must be greater than zero.");
+            if (height <= 0)
+                throw new ArgumentOutOfRangeException(nameof(height), "Image height must be greater than zero.");
+
+            return checked(width * height);
+        }
+
+        private static void DecodeRgba16f(ReadOnlySpan<byte> data, Span<uint> output, int pixelCount)
+        {
+            ReadOnlySpan<ushort> source = MemoryMarshal.Cast<byte, ushort>(data);
+            for (int i = 0; i < pixelCount; i++)
+            {
+                int offset = i * 4;
+                uint r = HalfToByte(source[offset]);
+                uint g = HalfToByte(source[offset + 1]);
+                uint b = HalfToByte(source[offset + 2]);
+                uint a = HalfToByte(source[offset + 3]);
+                output[i] = r | (g << 8) | (b << 16) | (a << 24);
+            }
+        }
+
+        private static uint HalfToByte(ushort bits)
+        {
+            float value = (float)BitConverter.UInt16BitsToHalf(bits);
+            if (!(value > 0)) return 0;
+            if (value >= 1) return 255;
+            return (uint)(value * 255.0f + 0.5f);
+        }
+
+        private static void DecodeDdsBgra8(ReadOnlySpan<byte> data, Span<uint> output, int pixelCount)
+        {
+            for (int i = 0; i < pixelCount; i++)
+            {
+                int offset = i * 4;
+                output[i] = (uint)data[offset + 2] |
+                            (uint)data[offset + 1] << 8 |
+                            (uint)data[offset] << 16 |
+                            (uint)data[offset + 3] << 24;
+            }
         }
     }
 }

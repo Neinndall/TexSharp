@@ -153,7 +153,7 @@ namespace TexSharp
             writer.BaseStream.Position = dataEnd;
 
             uint crc = Crc32Stream(writer.BaseStream, dataStart - 4, dataLen + 4);
-            writer.Write(crc);
+            writer.WriteBE(unchecked((int)crc));
         }
 
         private static uint Adler32(ReadOnlySpan<uint> pixels, int w, int h)

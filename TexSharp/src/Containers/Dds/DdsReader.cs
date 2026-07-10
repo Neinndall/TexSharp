@@ -25,6 +25,7 @@ namespace TexSharp.Containers.Dds
 
         public DdsReader(byte[] fileData)
         {
+            ArgumentNullException.ThrowIfNull(fileData);
             if (fileData.Length < Marshal.SizeOf<DdsHeader>())
                 throw new ArgumentException("File data is too small for a DDS header.");
 
@@ -32,6 +33,10 @@ namespace TexSharp.Containers.Dds
 
             if (Header.Magic != 0x20534444)
                 throw new ArgumentException("Invalid DDS magic signature.");
+            if (Header.Size != 124 || Header.PixelFormat.Size != 32)
+                throw new ArgumentException("Invalid DDS header size.", nameof(fileData));
+            if (Header.Width == 0 || Header.Height == 0 || Header.Width > int.MaxValue || Header.Height > int.MaxValue)
+                throw new ArgumentException("DDS dimensions must be valid positive Int32 values.", nameof(fileData));
 
             _fileData = fileData;
             _headerSize = 128;
@@ -39,12 +44,16 @@ namespace TexSharp.Containers.Dds
             uint dxgiFormat = 0;
             if (Header.PixelFormat.FourCC == DdsPixelFormat.MakeFourCC('D', 'X', '1', '0'))
             {
-                if (fileData.Length >= 148)
-                    dxgiFormat = BitConverter.ToUInt32(fileData, 128);
+                if (fileData.Length < 148)
+                    throw new ArgumentException("File data is too small for a DDS DX10 header.", nameof(fileData));
+
+                dxgiFormat = BitConverter.ToUInt32(fileData, 128);
                 _headerSize = 148;
             }
 
             Format = GetFormat(Header.PixelFormat, dxgiFormat);
+            if (Format == DdsFormat.Unknown)
+                throw new NotSupportedException("Unsupported DDS pixel format.");
             BuildMipChain();
         }
 
@@ -56,8 +65,9 @@ namespace TexSharp.Containers.Dds
             DdsFormat.Bc4 => DecodedFormat.Bc4,
             DdsFormat.Bc5 => DecodedFormat.Bc5,
             DdsFormat.Bc7 => DecodedFormat.Bc7,
-            DdsFormat.Rgba8 => DecodedFormat.Bgra8,
-            _ => DecodedFormat.Bgra8
+            DdsFormat.Rgba8 => DecodedFormat.Rgba8,
+            DdsFormat.Bgra8 => DecodedFormat.DdsBgra8,
+            _ => throw new NotSupportedException($"Unsupported DDS format: {Format}.")
         };
 
         private void BuildMipChain()
@@ -67,8 +77,12 @@ namespace TexSharp.Containers.Dds
             int h = (int)Header.Height;
 
             // El contador de mipmaps incluye el nivel base; si falta, asumimos 1.
+            int possibleLevels = BcImageDecoder.ComputeMipLevels(w, h);
+            if (Header.MipMapCount > (uint)possibleLevels)
+                throw new ArgumentException("DDS mip level count exceeds the dimensions allow.");
+
             int declared = (int)Header.MipMapCount;
-            int maxLevels = declared > 1 ? declared : BcImageDecoder.ComputeMipLevels(w, h);
+            int maxLevels = declared > 0 ? declared : 1;
 
             var sizes = new int[maxLevels];
             int cw = w, ch = h;
@@ -80,7 +94,7 @@ namespace TexSharp.Containers.Dds
             }
 
             int total = 0;
-            for (int i = 0; i < maxLevels; i++) total += sizes[i];
+            for (int i = 0; i < maxLevels; i++) total = checked(total + sizes[i]);
 
             int dataLen = _fileData.Length - _headerSize;
             int levelCount = maxLevels;
@@ -116,7 +130,7 @@ namespace TexSharp.Containers.Dds
                     83 or 84 => DdsFormat.Bc5,   // BC5 UNORM / SNORM
                     98 or 99 => DdsFormat.Bc7,   // BC7 UNORM / SRGB
                     28 => DdsFormat.Rgba8,       // R8G8B8A8 UNORM
-                    87 => DdsFormat.Rgba8,       // B8G8R8A8 UNORM
+                    87 => DdsFormat.Bgra8,       // B8G8R8A8 UNORM
                     _ => DdsFormat.Unknown
                 };
             }
@@ -153,7 +167,11 @@ namespace TexSharp.Containers.Dds
                 throw new ArgumentOutOfRangeException(nameof(level));
 
             MipInfo mip = _mips[level];
-            ReadOnlySpan<byte> mipData = _fileData.AsSpan(_headerSize + mip.Offset, BcImageDecoder.MipSize(mip.Width, mip.Height, ResolvedFormat));
+            int offset = checked(_headerSize + mip.Offset);
+            int expectedSize = BcImageDecoder.MipSize(mip.Width, mip.Height, ResolvedFormat);
+            int start = Math.Min(offset, _fileData.Length);
+            int available = offset < _fileData.Length ? Math.Min(expectedSize, _fileData.Length - offset) : 0;
+            ReadOnlySpan<byte> mipData = _fileData.AsSpan(start, available);
             BcImageDecoder.DecodeImage(mipData, mip.Width, mip.Height, ResolvedFormat, output);
         }
 
@@ -162,7 +180,7 @@ namespace TexSharp.Containers.Dds
             if (level < 0 || level >= MipLevels)
                 throw new ArgumentOutOfRangeException(nameof(level));
             MipInfo mip = _mips[level];
-            return mip.Width * mip.Height;
+            return checked(mip.Width * mip.Height);
         }
 
         public uint[][] DecodeAllMips()

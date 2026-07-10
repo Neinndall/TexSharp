@@ -28,7 +28,7 @@ namespace TexSharp.Tests
                 }
                 if (args[0] == "--benchmark")
                 {
-                    Benchmark();
+                    Benchmark(args.Length > 1 ? args[1] : null);
                     return;
                 }
                 if (args[0] == "--compare")
@@ -38,12 +38,31 @@ namespace TexSharp.Tests
                 }
                 if (args[0] == "--png")
                 {
+                    if (args.Length == 3)
+                    {
+                        TextureExporter.SaveToPng(args[1], args[2]);
+                        Console.WriteLine($"[PNG OK] {args[2]}");
+                        return;
+                    }
                     TestPngExport();
                     return;
                 }
                 if (args[0] == "--test" && args.Length > 1)
                 {
-                    ProcessExtra(args[1]);
+                    ProcessCorpus(args[1]);
+                    Finish();
+                    return;
+                }
+                if (args[0] == "--corpus" && args.Length > 1)
+                {
+                    ProcessCorpus(args[1]);
+                    Finish();
+                    return;
+                }
+                if (args[0] == "--unit")
+                {
+                    RunUnitTests();
+                    Finish();
                     return;
                 }
             }
@@ -51,22 +70,38 @@ namespace TexSharp.Tests
             Console.WriteLine("--- TexSharp Technical Test ---");
             Console.WriteLine($"Hardware Acceleration: {TextureEngine.IsHardwareAccelerated}");
 
+            RunUnitTests();
+            ProcessSamples();
+            VerifyGoldenHashes();
+            Finish();
+        }
+
+        static void RunUnitTests()
+        {
             TestBc1Decoding();
             TestBc3Decoding();
             TestBc5Decoding();
             TestBc2Decoding();
             TestBc4Decoding();
+            TestRgba16fDecoding();
+            TestShortBuffers();
             TestBc7Invariants();
             TestBc7Interpolation();
             TestBc7TableSpotChecks();
             TestTexMipmaps();
             TestDdsMipmaps();
-            ProcessSamples();
-            VerifyGoldenHashes();
+            TestDdsUncompressedChannels();
+            TestContainerValidation();
+            TestImageEdgeDimensions();
+        }
 
+        static void Finish()
+        {
             Console.WriteLine(_failures == 0
                 ? "\n[ALL TESTS PASSED]"
                 : $"\n[{_failures} TEST(S) FAILED]");
+
+            Environment.ExitCode = _failures == 0 ? 0 : 1;
         }
 
         static void Check(string name, bool condition)
@@ -126,6 +161,54 @@ namespace TexSharp.Tests
             // a0=a1=255, indices 0 -> 255.
             byte v = (byte)(outp[0] & 0xFF);
             Check("BC4 single channel 255", v == 255);
+        }
+
+        static void TestShortBuffers()
+        {
+            bool blockDidNotThrow = true;
+            try
+            {
+                Bc1Block.DecodeBlock(new byte[8], new uint[15]);
+                Bc2Block.DecodeBlock(new byte[16], new uint[15]);
+                Bc3Block.DecodeBlock(new byte[16], new uint[15]);
+                Bc4Block.DecodeBlock(new byte[8], new uint[15]);
+                Bc5Block.DecodeBlock(new byte[16], new uint[15]);
+                Bc7Block.DecodeBlock(new byte[16], new uint[15]);
+            }
+            catch
+            {
+                blockDidNotThrow = false;
+            }
+            Check("Block decoders accept short output buffers", blockDidNotThrow);
+
+            uint[] output = Enumerable.Repeat(0xAABBCCDDu, 16).ToArray();
+            BcImageDecoder.DecodeImage(new byte[7], 4, 4, DecodedFormat.Bc1, output);
+            Check("Image decoder leaves output unchanged for truncated data", output.All(pixel => pixel == 0xAABBCCDDu));
+
+            bool smallOutputThrows = false;
+            try
+            {
+                BcImageDecoder.DecodeImage(new byte[8], 4, 4, DecodedFormat.Bc1, new uint[15]);
+            }
+            catch (ArgumentException)
+            {
+                smallOutputThrows = true;
+            }
+            Check("Image decoder rejects a short output buffer", smallOutputThrows);
+        }
+
+        static void TestRgba16fDecoding()
+        {
+            byte[] pixel = { 0x00, 0x3C, 0x00, 0x38, 0x00, 0x00, 0x00, 0x3C };
+            uint[] output = new uint[1];
+            BcImageDecoder.DecodeImage(pixel, 1, 1, DecodedFormat.Rgba16f, output);
+            Check("RGBA16F converts Half channels to RGBA8", output[0] == 0xFF0080FFu);
+
+            byte[] tex = new byte[20];
+            tex[0] = 0x54; tex[1] = 0x45; tex[2] = 0x58;
+            tex[4] = 1; tex[6] = 1; tex[9] = (byte)TexFormat.Rgba16f;
+            Array.Copy(pixel, 0, tex, 12, pixel.Length);
+            Check("TEX format 21 is supported", new TexReader(tex).Decode()[0] == 0xFF0080FFu);
         }
 
         // --- BC7 ---
@@ -254,7 +337,7 @@ namespace TexSharp.Tests
             // Magic "DDS "
             header[0] = 0x44; header[1] = 0x44; header[2] = 0x53; header[3] = 0x20;
             header[4] = 124; // Size = 124
-            header[7] = 0x02; // Flags (DDSD_HEIGHT|WIDTH simplified)
+            header[8] = 0x02; // Flags (DDSD_HEIGHT|WIDTH simplified)
             BitConverter.GetBytes(4).CopyTo(header, 12); // Height
             BitConverter.GetBytes(4).CopyTo(header, 16);  // Width
             BitConverter.GetBytes(2u).CopyTo(header, 28); // MipMapCount = 2
@@ -279,16 +362,103 @@ namespace TexSharp.Tests
             Check("DDS mip1 = blue", (smallest[0] & 0xFFFFFF) == 0xFF0000);
         }
 
-        static string GetSamplesPath()
+        static void TestDdsUncompressedChannels()
         {
-            string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Samples");
-            if (!Directory.Exists(path)) Directory.CreateDirectory(path);
-            return path;
+            uint expected = 0x40302010;
+
+            byte[] rgba = CreateDx10Dds(28, new byte[] { 0x10, 0x20, 0x30, 0x40 });
+            Check("DDS DX10 RGBA8 preserves channel order", new DdsReader(rgba).Decode()[0] == expected);
+
+            byte[] bgra = CreateDx10Dds(87, new byte[] { 0x30, 0x20, 0x10, 0x40 });
+            Check("DDS DX10 BGRA8 converts to RGBA order", new DdsReader(bgra).Decode()[0] == expected);
         }
 
-        static List<string> GetSampleFiles()
+        static byte[] CreateDx10Dds(uint dxgiFormat, byte[] pixel)
         {
-            string samplesPath = GetSamplesPath();
+            byte[] data = CreateDdsHeader(1, 1, 1, DdsPixelFormat.MakeFourCC('D', 'X', '1', '0'));
+            Array.Resize(ref data, 148 + pixel.Length);
+            BitConverter.GetBytes(dxgiFormat).CopyTo(data, 128);
+            Array.Copy(pixel, 0, data, 148, pixel.Length);
+            return data;
+        }
+
+        static void TestContainerValidation()
+        {
+            bool texHeaderRejected = false;
+            try { _ = new TexReader(new byte[11]); }
+            catch (ArgumentException) { texHeaderRejected = true; }
+            Check("TEX truncated header is rejected", texHeaderRejected);
+
+            byte[] unknownTex = new byte[12];
+            unknownTex[0] = 0x54; unknownTex[1] = 0x45; unknownTex[2] = 0x58;
+            unknownTex[4] = 4; unknownTex[6] = 4; unknownTex[9] = 0xFF;
+            bool unknownTexRejected = false;
+            try { _ = new TexReader(unknownTex); }
+            catch (NotSupportedException) { unknownTexRejected = true; }
+            Check("Unsupported TEX format is rejected", unknownTexRejected);
+
+            byte[] dds = CreateDdsHeader(4, 4, 0, DdsPixelFormat.MakeFourCC('D', 'X', 'T', '1'));
+            Array.Resize(ref dds, 136);
+            var singleMip = new DdsReader(dds);
+            Check("DDS without mip count has one mip", singleMip.MipLevels == 1);
+
+            byte[] truncatedDx10 = CreateDdsHeader(4, 4, 1, DdsPixelFormat.MakeFourCC('D', 'X', '1', '0'));
+            bool dx10Rejected = false;
+            try { _ = new DdsReader(truncatedDx10); }
+            catch (ArgumentException) { dx10Rejected = true; }
+            Check("Truncated DDS DX10 header is rejected", dx10Rejected);
+
+            byte[] excessiveMips = CreateDdsHeader(4, 4, 4, DdsPixelFormat.MakeFourCC('D', 'X', 'T', '1'));
+            bool excessiveMipsRejected = false;
+            try { _ = new DdsReader(excessiveMips); }
+            catch (ArgumentException) { excessiveMipsRejected = true; }
+            Check("DDS excessive mip count is rejected", excessiveMipsRejected);
+        }
+
+        static void TestImageEdgeDimensions()
+        {
+            byte[] redBlock = { 0x00, 0xF8, 0x00, 0x00, 0, 0, 0, 0 };
+            (int Width, int Height)[] dimensions = { (1, 1), (3, 2), (5, 3), (7, 9) };
+            bool allRed = true;
+
+            foreach (var (width, height) in dimensions)
+            {
+                int size = BcImageDecoder.MipSize(width, height, DecodedFormat.Bc1);
+                byte[] data = new byte[size];
+                for (int offset = 0; offset < data.Length; offset += redBlock.Length)
+                    Array.Copy(redBlock, 0, data, offset, redBlock.Length);
+
+                uint[] pixels = new uint[width * height];
+                BcImageDecoder.DecodeImage(data, width, height, DecodedFormat.Bc1, pixels);
+                if (pixels.Any(pixel => (pixel & 0x00FFFFFF) != 0x0000FF))
+                    allRed = false;
+            }
+
+            Check("BC1 decodes non-aligned dimensions", allRed);
+        }
+
+        static byte[] CreateDdsHeader(int width, int height, int mipLevels, uint fourCC)
+        {
+            byte[] header = new byte[128];
+            header[0] = 0x44; header[1] = 0x44; header[2] = 0x53; header[3] = 0x20;
+            BitConverter.GetBytes(124u).CopyTo(header, 4);
+            BitConverter.GetBytes(height).CopyTo(header, 12);
+            BitConverter.GetBytes(width).CopyTo(header, 16);
+            BitConverter.GetBytes((uint)mipLevels).CopyTo(header, 28);
+            BitConverter.GetBytes(32u).CopyTo(header, 76);
+            BitConverter.GetBytes(0x4u).CopyTo(header, 80);
+            BitConverter.GetBytes(fourCC).CopyTo(header, 84);
+            return header;
+        }
+
+        static string GetSamplesPath()
+        {
+            return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Samples");
+        }
+
+        static List<string> GetSampleFiles(string samplesPath)
+        {
+            if (!Directory.Exists(samplesPath)) return new List<string>();
             return Directory.GetFiles(samplesPath, "*.*", SearchOption.AllDirectories)
                 .Where(f => f.EndsWith(".tex", StringComparison.OrdinalIgnoreCase) ||
                             f.EndsWith(".dds", StringComparison.OrdinalIgnoreCase)).ToList();
@@ -355,8 +525,27 @@ namespace TexSharp.Tests
 
         static void ProcessSamples()
         {
-            var files = GetSampleFiles();
-            if (files.Count == 0) return;
+            ProcessCorpus(GetSamplesPath(), required: false);
+        }
+
+        static void ProcessCorpus(string dirPath, bool required = true)
+        {
+            if (!Directory.Exists(dirPath))
+            {
+                Console.WriteLine($"[WARN] Corpus directory not found: {dirPath}");
+                if (required) _failures++;
+                return;
+            }
+
+            var files = GetSampleFiles(dirPath);
+            if (files.Count == 0)
+            {
+                Console.WriteLine($"[WARN] No TEX or DDS files found in: {dirPath}");
+                if (required) _failures++;
+                return;
+            }
+
+            int failed = 0;
 
             foreach (var file in files)
             {
@@ -368,35 +557,16 @@ namespace TexSharp.Tests
                 catch (Exception ex)
                 {
                     Console.WriteLine($"[FAILURE] {Path.GetFileName(file)} | {ex.Message}");
+                    failed++;
                 }
             }
-        }
-
-        static void ProcessExtra(string dirPath)
-        {
-            if (!Directory.Exists(dirPath)) { Console.WriteLine($"[ERR] Directory not found: {dirPath}"); return; }
-            var files = Directory.GetFiles(dirPath, "*.*", SearchOption.AllDirectories)
-                .Where(f => f.EndsWith(".tex", StringComparison.OrdinalIgnoreCase)).ToList();
-            int ok = 0, fail = 0;
-            foreach (var file in files)
-            {
-                try
-                {
-                    uint[] pixels = DecodeSampleFile(file);
-                    ok++;
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[FAIL] {Path.GetFileName(file)} | {ex.Message}");
-                    fail++;
-                }
-            }
-            Console.WriteLine($"\nExtra: OK={ok} FAIL={fail} TOTAL={ok + fail}");
+            _failures += failed;
+            Console.WriteLine($"\nCorpus: OK={files.Count - failed} FAIL={failed} TOTAL={files.Count}");
         }
 
         static void ComputeAndSaveGoldenHashes()
         {
-            var files = GetSampleFiles();
+            var files = GetSampleFiles(GetSamplesPath());
             if (files.Count == 0)
             {
                 Console.WriteLine("[WARN] No sample files found.");
@@ -478,7 +648,7 @@ namespace TexSharp.Tests
 
         static void TestPngExport()
         {
-            var files = GetSampleFiles();
+            var files = GetSampleFiles(GetSamplesPath());
             string dest = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
             int count = 0;
             foreach (var file in files.Take(5))
@@ -502,7 +672,7 @@ namespace TexSharp.Tests
 
         static void CompareDetailed()
         {
-            var files = GetSampleFiles();
+            var files = GetSampleFiles(GetSamplesPath());
             if (files.Count == 0) return;
 
             var bcn = new BcDecoder();
@@ -567,102 +737,89 @@ namespace TexSharp.Tests
             Console.WriteLine($"Max diff R={maxDiffR} G={maxDiffG} B={maxDiffB} A={maxDiffA}");
         }
 
-        static void Benchmark()
-    {
-        var files = GetSampleFiles();
-        if (files.Count == 0)
+        static void Benchmark(string? corpusPath)
         {
-            Console.WriteLine("[WARN] No sample files to benchmark.");
-            return;
+            Console.WriteLine("--- TexSharp decode-core benchmark ---");
+            Console.WriteLine("I/O, container parsing and output allocations are excluded from these measurements.");
+
+            BenchmarkDecodeCore(DecodedFormat.Bc1, "BC1", 1024, 1024, 32);
+            BenchmarkDecodeCore(DecodedFormat.Bc2, "BC2", 1024, 1024, 16);
+            BenchmarkDecodeCore(DecodedFormat.Bc3, "BC3", 1024, 1024, 16);
+            BenchmarkDecodeCore(DecodedFormat.Bc4, "BC4", 1024, 1024, 24);
+            BenchmarkDecodeCore(DecodedFormat.Bc5, "BC5", 1024, 1024, 16);
+            BenchmarkDecodeCore(DecodedFormat.Bc7, "BC7", 1024, 1024, 8);
+
+            string path = corpusPath ?? GetSamplesPath();
+            if (Directory.Exists(path))
+                BenchmarkContainerPipeline(path);
         }
 
-        var bcn = new BcDecoder();
-        long texSharpBytes = 0, bcnBytes = 0;
-        int texSharpOk = 0, bcnOk = 0;
-        int mismatchedPixels = 0;
-
-        var ts = Stopwatch.StartNew();
-        foreach (var file in files)
+        static void BenchmarkDecodeCore(DecodedFormat format, string name, int width, int height, int iterations)
         {
-            try
+            byte[] data = new byte[BcImageDecoder.MipSize(width, height, format)];
+            for (int i = 0; i < data.Length; i++) data[i] = (byte)(i * 149 + 37);
+
+            uint[] output = new uint[width * height];
+            for (int i = 0; i < 3; i++)
+                BcImageDecoder.DecodeImage(data, width, height, format, output);
+
+            uint checksum = 0;
+            var timer = Stopwatch.StartNew();
+            for (int i = 0; i < iterations; i++)
             {
-                uint[] pixels = DecodeSampleFile(file);
-                texSharpBytes += pixels.Length * 4;
-                texSharpOk++;
+                BcImageDecoder.DecodeImage(data, width, height, format, output);
+                checksum ^= output[(i * 4099) & (output.Length - 1)];
             }
-            catch { }
-        }
-        ts.Stop();
+            timer.Stop();
 
-        var be = Stopwatch.StartNew();
-        foreach (var file in files)
+            double megabytes = (double)width * height * sizeof(uint) * iterations / (1024 * 1024);
+            Console.WriteLine($"{name,-4} {megabytes / timer.Elapsed.TotalSeconds,8:F1} MB/s  {timer.Elapsed.TotalMilliseconds,8:F1} ms  checksum={checksum:X8}");
+        }
+
+        static void BenchmarkContainerPipeline(string corpusPath)
         {
-            try
+            const long maxInputBytes = 256L * 1024 * 1024;
+            var samples = new List<(string File, byte[] Data)>();
+            long inputBytes = 0;
+
+            foreach (string file in GetSampleFiles(corpusPath))
             {
-                byte[] raw = File.ReadAllBytes(file);
-                byte[] baseMip = ExtractBaseMipData(raw, out int w, out int h, out CompressionFormat cf);
-
-                ColorRgba32[] result;
-                if (cf == CompressionFormat.Bgra)
-                {
-                    result = MemoryMarshal.Cast<byte, ColorRgba32>(baseMip.AsSpan()).ToArray();
-                }
-                else
-                {
-                    result = bcn.DecodeRaw(new Memory<byte>(baseMip), w, h, cf);
-                }
-
-                bcnBytes += (uint)result.Length * 4;
-                bcnOk++;
+                byte[] data = File.ReadAllBytes(file);
+                if (inputBytes + data.Length > maxInputBytes) break;
+                samples.Add((file, data));
+                inputBytes += data.Length;
             }
-            catch { }
-        }
-        be.Stop();
 
-        // Compare pixel outputs
-        foreach (var file in files)
+            if (samples.Count == 0)
+            {
+                Console.WriteLine("[WARN] No corpus files were loaded for the container benchmark.");
+                return;
+            }
+
+            foreach (var sample in samples)
+                _ = DecodeSampleData(sample.File, sample.Data);
+
+            long outputBytes = 0;
+            uint checksum = 0;
+            var timer = Stopwatch.StartNew();
+            foreach (var sample in samples)
+            {
+                uint[] pixels = DecodeSampleData(sample.File, sample.Data);
+                outputBytes += pixels.Length * sizeof(uint);
+                checksum ^= pixels[0];
+            }
+            timer.Stop();
+
+            double throughput = outputBytes / (1024.0 * 1024.0) / timer.Elapsed.TotalSeconds;
+            Console.WriteLine($"Container pipeline ({samples.Count} files, {inputBytes / (1024.0 * 1024.0):F1} MiB input): {throughput:F1} MB/s  checksum={checksum:X8}");
+        }
+
+        static uint[] DecodeSampleData(string file, byte[] data)
         {
-            try
-            {
-                uint[] tsPixels = DecodeSampleFile(file);
-
-                byte[] raw = File.ReadAllBytes(file);
-                byte[] baseMip = ExtractBaseMipData(raw, out int w, out int h, out CompressionFormat cf);
-
-                ColorRgba32[] bcnResult;
-                if (cf == CompressionFormat.Bgra)
-                {
-                    bcnResult = MemoryMarshal.Cast<byte, ColorRgba32>(baseMip.AsSpan()).ToArray();
-                }
-                else
-                {
-                    bcnResult = bcn.DecodeRaw(new Memory<byte>(baseMip), w, h, cf);
-                }
-
-                for (int i = 0; i < tsPixels.Length && i < bcnResult.Length; i++)
-                {
-                    uint tsP = tsPixels[i];
-                    uint bcnP = (uint)bcnResult[i].r | (uint)bcnResult[i].g << 8 |
-                                (uint)bcnResult[i].b << 16 | (uint)bcnResult[i].a << 24;
-                    if (tsP != bcnP)
-                    {
-                        mismatchedPixels++;
-                    }
-                }
-            }
-            catch { }
+            return file.EndsWith(".tex", StringComparison.OrdinalIgnoreCase)
+                ? new TexReader(data).DecodeMip(0)
+                : new DdsReader(data).DecodeMip(0);
         }
-
-        double tsMbps = texSharpBytes / (1024.0 * 1024.0) / (ts.Elapsed.TotalSeconds);
-        double bcnMbps = bcnBytes / (1024.0 * 1024.0) / (be.Elapsed.TotalSeconds);
-
-        Console.WriteLine($"\n--- BENCHMARK ---");
-        Console.WriteLine($"Files: {files.Count}");
-        Console.WriteLine($"TexSharp:   {texSharpOk} files  {ts.Elapsed.TotalSeconds:F3}s  {tsMbps:F1} MB/s");
-        Console.WriteLine($"BCnEncoder: {bcnOk} files  {be.Elapsed.TotalSeconds:F3}s  {bcnMbps:F1} MB/s");
-        Console.WriteLine($"Ratio: {be.Elapsed.TotalSeconds / ts.Elapsed.TotalSeconds:F2}x");
-        Console.WriteLine($"Pixel mismatches: {mismatchedPixels}");
-    }
 
     // Escritor de bits little-endian para construir bloques BC7 en los tests.
     class BitWriter

@@ -1,33 +1,42 @@
 using System;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace TexSharp.Utils
 {
     public ref struct BitReader
     {
-        private ReadOnlySpan<byte> _data;
+        private readonly ulong _low;
+        private readonly ulong _high;
         private int _bitOffset;
 
         public BitReader(ReadOnlySpan<byte> data)
         {
-            _data = data;
+            _low = data.Length >= sizeof(ulong) ? MemoryMarshal.Read<ulong>(data) : 0;
+            _high = data.Length >= sizeof(ulong) * 2 ? MemoryMarshal.Read<ulong>(data.Slice(sizeof(ulong))) : 0;
             _bitOffset = 0;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public int Read(int count)
         {
-            int value = 0;
-            for (int i = 0; i < count; i++)
+            if (count == 0) return 0;
+
+            int offset = _bitOffset;
+            ulong value;
+            if (offset < 64)
             {
-                int byteIdx = _bitOffset >> 3;
-                int bitIdx = _bitOffset & 0x7;
-                
-                if ((_data[byteIdx] & (1 << bitIdx)) != 0)
-                {
-                    value |= (1 << i);
-                }
-                _bitOffset++;
+                value = _low >> offset;
+                if (offset + count > 64)
+                    value |= _high << (64 - offset);
             }
-            return value;
+            else
+            {
+                value = _high >> (offset - 64);
+            }
+
+            _bitOffset = offset + count;
+            return (int)(value & ((1UL << count) - 1));
         }
 
         public void Skip(int count)

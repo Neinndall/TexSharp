@@ -11,7 +11,7 @@ namespace TexSharp.Formats.BC
     {
         public static void DecodeBlock(ReadOnlySpan<byte> data, Span<uint> rgbaOutput)
         {
-            if (data.Length < 16) return;
+            if (data.Length < 16 || rgbaOutput.Length < 16) return;
 
             Span<byte> alphas = stackalloc byte[16];
             BcCommon.DecodeAlphaBlock(data.Slice(0, 8), alphas);
@@ -27,6 +27,8 @@ namespace TexSharp.Formats.BC
 
         public static void DecodeColorBlock(ReadOnlySpan<byte> data, Span<uint> rgbaOutput)
         {
+            if (data.Length < 8 || rgbaOutput.Length < 16) return;
+
             ushort c0 = MemoryMarshal.Read<ushort>(data);
             ushort c1 = MemoryMarshal.Read<ushort>(data.Slice(2));
             uint indices = MemoryMarshal.Read<uint>(data.Slice(4));

@@ -11,7 +11,7 @@ namespace TexSharp.Formats.BC
     {
         public static void DecodeBlock(ReadOnlySpan<byte> data, Span<uint> rgbaOutput)
         {
-            if (data.Length < 16) return;
+            if (data.Length < 16 || rgbaOutput.Length < 16) return;
 
             // Alpha explícito de 4 bits (un nibble por píxel, en orden little-endian).
             Span<byte> alphas = stackalloc byte[16];

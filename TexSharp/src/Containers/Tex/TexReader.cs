@@ -14,7 +14,8 @@ namespace TexSharp.Containers.Tex
         Bc3 = 12,
         Bc7 = 13,
         Bc5 = 14,
-        Bgra8 = 20
+        Bgra8 = 20,
+        Rgba16f = 21
     }
 
     [Flags]
@@ -46,6 +47,11 @@ namespace TexSharp.Containers.Tex
 
         public TexReader(byte[] fileData)
         {
+            ArgumentNullException.ThrowIfNull(fileData);
+            if (fileData.Length < HeaderSize)
+                throw new ArgumentException("File data is too small for a TEX header.", nameof(fileData));
+
+            _fileData = fileData;
             uint magic = BitConverter.ToUInt32(fileData, 0);
             if (magic != 0x00584554)
                 throw new ArgumentException("Invalid TEX magic signature.");
@@ -55,7 +61,10 @@ namespace TexSharp.Containers.Tex
             Format = (TexFormat)fileData[9];
             Flags = (TexFlags)fileData[11];
 
-            _fileData = fileData;
+            _ = ResolvedFormat;
+            if (Width == 0 || Height == 0)
+                throw new ArgumentException("TEX dimensions must be greater than zero.", nameof(fileData));
+
             BuildMipChain();
         }
 
@@ -66,7 +75,8 @@ namespace TexSharp.Containers.Tex
             TexFormat.Bc7 => DecodedFormat.Bc7,
             TexFormat.Bc5 => DecodedFormat.Bc5,
             TexFormat.Bgra8 => DecodedFormat.Bgra8,
-            _ => DecodedFormat.Bgra8
+            TexFormat.Rgba16f => DecodedFormat.Rgba16f,
+            _ => throw new NotSupportedException($"Unsupported TEX format: {Format}.")
         };
 
         private void BuildMipChain()
@@ -88,7 +98,7 @@ namespace TexSharp.Containers.Tex
             }
 
             int total = 0;
-            for (int i = 0; i < maxLevels; i++) total += sizes[i];
+            for (int i = 0; i < maxLevels; i++) total = checked(total + sizes[i]);
 
             int dataLen = _fileData.Length - HeaderSize;
             int levelCount = maxLevels;
@@ -132,7 +142,11 @@ namespace TexSharp.Containers.Tex
                 throw new ArgumentOutOfRangeException(nameof(level));
 
             MipInfo mip = _mips[level];
-            ReadOnlySpan<byte> mipData = _fileData.AsSpan(HeaderSize + mip.Offset, BcImageDecoder.MipSize(mip.Width, mip.Height, ResolvedFormat));
+            int offset = checked(HeaderSize + mip.Offset);
+            int expectedSize = BcImageDecoder.MipSize(mip.Width, mip.Height, ResolvedFormat);
+            int start = Math.Min(offset, _fileData.Length);
+            int available = offset < _fileData.Length ? Math.Min(expectedSize, _fileData.Length - offset) : 0;
+            ReadOnlySpan<byte> mipData = _fileData.AsSpan(start, available);
             BcImageDecoder.DecodeImage(mipData, mip.Width, mip.Height, ResolvedFormat, output);
         }
 
@@ -141,7 +155,7 @@ namespace TexSharp.Containers.Tex
             if (level < 0 || level >= MipLevels)
                 throw new ArgumentOutOfRangeException(nameof(level));
             MipInfo mip = _mips[level];
-            return mip.Width * mip.Height;
+            return checked(mip.Width * mip.Height);
         }
 
         public uint[][] DecodeAllMips()
