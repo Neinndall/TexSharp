@@ -80,11 +80,11 @@ namespace TexSharp.Formats
             {
                 case DecodedFormat.Bc1: DecodeBc1(data, output, width, height, blocksX, blocksY, aligned); return;
                 case DecodedFormat.Bc3: DecodeBc3(data, output, width, height, blocksX, blocksY, aligned); return;
-                case DecodedFormat.Bc2: DecodeGeneric(data, output, width, height, blocksX, blocksY, 16, aligned, Bc2Block.DecodeBlock); return;
-                case DecodedFormat.Bc4: DecodeGeneric(data, output, width, height, blocksX, blocksY, 8, aligned, Bc4Block.DecodeBlock); return;
-                case DecodedFormat.Bc5: DecodeGeneric(data, output, width, height, blocksX, blocksY, 16, aligned, Bc5Block.DecodeBlock); return;
-                case DecodedFormat.Bc4Snorm: DecodeGeneric(data, output, width, height, blocksX, blocksY, 8, aligned, Bc4SnormBlock.DecodeBlock); return;
-                case DecodedFormat.Bc5Snorm: DecodeGeneric(data, output, width, height, blocksX, blocksY, 16, aligned, Bc5SnormBlock.DecodeBlock); return;
+                case DecodedFormat.Bc2: DecodeBc2(data, output, width, height, blocksX, blocksY, aligned); return;
+                case DecodedFormat.Bc4: DecodeBc4(data, output, width, height, blocksX, blocksY, aligned, false); return;
+                case DecodedFormat.Bc5: DecodeBc5(data, output, width, height, blocksX, blocksY, aligned, false); return;
+                case DecodedFormat.Bc4Snorm: DecodeBc4(data, output, width, height, blocksX, blocksY, aligned, true); return;
+                case DecodedFormat.Bc5Snorm: DecodeBc5(data, output, width, height, blocksX, blocksY, aligned, true); return;
                 case DecodedFormat.Bc7: DecodeBc7(data, output, width, height, blocksX, blocksY, aligned); return;
             }
         }
@@ -248,21 +248,97 @@ namespace TexSharp.Formats
             }
         }
 
-        private static void DecodeGeneric(ReadOnlySpan<byte> data, Span<uint> output,
-            int width, int height, int blocksX, int blocksY, int blockSize, bool aligned,
-            Action<ReadOnlySpan<byte>, Span<uint>> decodeBlock)
+        private static void DecodeBc2(ReadOnlySpan<byte> data, Span<uint> output,
+            int width, int height, int blocksX, int blocksY, bool aligned)
         {
             Span<uint> block = stackalloc uint[16];
             for (int y = 0; y < blocksY; y++)
             {
                 for (int x = 0; x < blocksX; x++)
                 {
-                    int offset = (y * blocksX + x) * blockSize;
-                    if (offset + blockSize > data.Length) return;
-                    ReadOnlySpan<byte> blockData = data.Slice(offset, blockSize);
-                    decodeBlock(blockData, block);
+                    int offset = (y * blocksX + x) << 4;
+                    Bc2Block.DecodeBlock(data.Slice(offset, 16), block);
                     WriteBlock(output, width, y, x, block, aligned, height);
                 }
+            }
+        }
+
+        private static void DecodeBc4(ReadOnlySpan<byte> data, Span<uint> output,
+            int width, int height, int blocksX, int blocksY, bool aligned, bool signed)
+        {
+            Span<byte> values = stackalloc byte[16];
+            for (int y = 0; y < blocksY; y++)
+            {
+                for (int x = 0; x < blocksX; x++)
+                {
+                    int offset = (y * blocksX + x) << 3;
+                    ReadOnlySpan<byte> blockData = data.Slice(offset, 8);
+                    if (signed) Bc4SnormBlock.DecodeSignedChannel(blockData, values);
+                    else BcCommon.DecodeAlphaBlock(blockData, values);
+                    WriteBc4Channel(output, width, height, y, x, values, signed, aligned);
+                }
+            }
+        }
+
+        private static void DecodeBc5(ReadOnlySpan<byte> data, Span<uint> output,
+            int width, int height, int blocksX, int blocksY, bool aligned, bool signed)
+        {
+            Span<byte> reds = stackalloc byte[16];
+            Span<byte> greens = stackalloc byte[16];
+            for (int y = 0; y < blocksY; y++)
+            {
+                for (int x = 0; x < blocksX; x++)
+                {
+                    int offset = (y * blocksX + x) << 4;
+                    ReadOnlySpan<byte> blockData = data.Slice(offset, 16);
+                    if (signed)
+                    {
+                        Bc4SnormBlock.DecodeSignedChannel(blockData[..8], reds);
+                        Bc4SnormBlock.DecodeSignedChannel(blockData[8..], greens);
+                    }
+                    else
+                    {
+                        BcCommon.DecodeAlphaBlock(blockData[..8], reds);
+                        BcCommon.DecodeAlphaBlock(blockData[8..], greens);
+                    }
+                    WriteBc5Channels(output, width, height, y, x, reds, greens, signed, aligned);
+                }
+            }
+        }
+
+        private static void WriteBc4Channel(Span<uint> output, int width, int height, int blockY, int blockX,
+            ReadOnlySpan<byte> values, bool signed, bool aligned)
+        {
+            int baseX = blockX << 2;
+            int baseY = blockY << 2;
+            uint multiplier = signed ? 1u : 0x00010101u;
+            for (int py = 0; py < 4; py++)
+            {
+                int targetY = baseY + py;
+                if (!aligned && targetY >= height) break;
+                int row = targetY * width + baseX;
+                int source = py << 2;
+                int count = aligned ? 4 : Math.Min(4, width - baseX);
+                for (int px = 0; px < count; px++)
+                    output[row + px] = values[source + px] * multiplier | 0xFF000000u;
+            }
+        }
+
+        private static void WriteBc5Channels(Span<uint> output, int width, int height, int blockY, int blockX,
+            ReadOnlySpan<byte> reds, ReadOnlySpan<byte> greens, bool signed, bool aligned)
+        {
+            int baseX = blockX << 2;
+            int baseY = blockY << 2;
+            uint upperChannels = signed ? 0xFF000000u : 0xFFFF0000u;
+            for (int py = 0; py < 4; py++)
+            {
+                int targetY = baseY + py;
+                if (!aligned && targetY >= height) break;
+                int row = targetY * width + baseX;
+                int source = py << 2;
+                int count = aligned ? 4 : Math.Min(4, width - baseX);
+                for (int px = 0; px < count; px++)
+                    output[row + px] = reds[source + px] | (uint)greens[source + px] << 8 | upperChannels;
             }
         }
 

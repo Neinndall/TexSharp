@@ -537,6 +537,33 @@ namespace TexSharp.Tests
             }
 
             Check("BC1 decodes non-aligned dimensions", allRed);
+
+            byte[] fullChannel = { 0xFF, 0x00, 0, 0, 0, 0, 0, 0 };
+            Check("BC4 decodes non-aligned dimensions",
+                ValidateNonAlignedChannels(dimensions, DecodedFormat.Bc4, fullChannel, 0xFFFFFFFFu));
+
+            byte[] fullChannels = new byte[16];
+            fullChannel.CopyTo(fullChannels, 0);
+            fullChannel.CopyTo(fullChannels, 8);
+            Check("BC5 decodes non-aligned dimensions",
+                ValidateNonAlignedChannels(dimensions, DecodedFormat.Bc5, fullChannels, 0xFFFFFFFFu));
+        }
+
+        static bool ValidateNonAlignedChannels((int Width, int Height)[] dimensions, DecodedFormat format,
+            byte[] block, uint expected)
+        {
+            foreach (var (width, height) in dimensions)
+            {
+                byte[] data = new byte[BcImageDecoder.MipSize(width, height, format)];
+                for (int offset = 0; offset < data.Length; offset += block.Length)
+                    block.CopyTo(data, offset);
+
+                uint[] pixels = new uint[width * height];
+                BcImageDecoder.DecodeImage(data, width, height, format, pixels);
+                if (pixels.Any(pixel => pixel != expected)) return false;
+            }
+
+            return true;
         }
 
         static byte[] CreateDdsHeader(int width, int height, int mipLevels, uint fourCC)

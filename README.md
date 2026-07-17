@@ -8,6 +8,7 @@ Ultra-high performance texture decoding library for .NET 10, with native PNG exp
 - **Export to PNG** directly, no ImageSharp or any external library needed
 - **Mipmap support** — read any level, or all levels
 - **No hot-loop allocations** — block decoders use spans and stack buffers
+- **Specialized image paths** — BC2/BC4/BC5 avoid delegate dispatch, while BC4/BC5 write decoded channels directly to the destination image
 - **Reproducible** — calibrated per-format benchmarks and versioned golden fixtures
 - **Validated** — historical external corpus runs cover more than 13,000 real `.tex` files
 

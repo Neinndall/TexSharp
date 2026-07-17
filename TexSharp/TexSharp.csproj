@@ -4,7 +4,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <Version>1.0.0-beta.2</Version>
+    <Version>1.0.0-beta.3</Version>
     <Title>TexSharp</Title>
     <Authors>Neinndall</Authors>
     <Description>An ultra-high performance texture decoding library for .NET 10, optimized for Block Compression (BC1-BC7) and game asset formats such as .tex and .dds.</Description>
