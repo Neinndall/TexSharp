@@ -85,8 +85,8 @@ namespace TexSharp
             byte[] rowBuf = ArrayPool<byte>.Shared.Rent(rowLen);
             try
             {
-                using var compressedMs = new MemoryStream();
-                using (var deflate = new DeflateStream(compressedMs, CompressionLevel.Optimal, leaveOpen: true))
+                using (var idat = new IdatChunkStream(writer))
+                using (var zlib = new ZLibStream(idat, CompressionLevel.Optimal, leaveOpen: true))
                 {
                     for (int y = 0; y < height; y++)
                     {
@@ -100,33 +100,8 @@ namespace TexSharp
                             rowBuf[o + 2] = (byte)((pixel >> 16) & 0xFF);
                             rowBuf[o + 3] = (byte)((pixel >> 24) & 0xFF);
                         }
-                        deflate.Write(rowBuf, 0, rowLen);
+                        zlib.Write(rowBuf, 0, rowLen);
                     }
-                }
-
-                byte[] compressedBuf = compressedMs.GetBuffer();
-                int compressedLen = (int)compressedMs.Length;
-                int zlibLen = compressedLen + 6;
-
-                byte[] zlibBuf = ArrayPool<byte>.Shared.Rent(zlibLen);
-                try
-                {
-                    zlibBuf[0] = 0x78;
-                    zlibBuf[1] = 0x01;
-                    Buffer.BlockCopy(compressedBuf, 0, zlibBuf, 2, compressedLen);
-
-                    uint adler = Adler32(pixels, width, height);
-                    int end = compressedLen + 2;
-                    zlibBuf[end] = (byte)(adler >> 24);
-                    zlibBuf[end + 1] = (byte)(adler >> 16);
-                    zlibBuf[end + 2] = (byte)(adler >> 8);
-                    zlibBuf[end + 3] = (byte)adler;
-
-                    WriteChunk(writer, "IDAT", bw => bw.Write(zlibBuf, 0, zlibLen));
-                }
-                finally
-                {
-                    ArrayPool<byte>.Shared.Return(zlibBuf);
                 }
             }
             finally
@@ -156,26 +131,58 @@ namespace TexSharp
             writer.WriteBE(unchecked((int)crc));
         }
 
-        private static uint Adler32(ReadOnlySpan<uint> pixels, int w, int h)
+        private sealed class IdatChunkStream : Stream
         {
-            const uint MOD = 65521;
-            uint a = 1, b = 0;
-            for (int y = 0; y < h; y++)
+            private const int BufferSize = 64 * 1024;
+            private readonly BinaryWriter _writer;
+            private readonly byte[] _buffer = ArrayPool<byte>.Shared.Rent(BufferSize);
+            private int _count;
+            private bool _disposed;
+
+            public IdatChunkStream(BinaryWriter writer) => _writer = writer;
+            public override bool CanRead => false;
+            public override bool CanSeek => false;
+            public override bool CanWrite => true;
+            public override long Length => throw new NotSupportedException();
+            public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+
+            public override void Write(byte[] buffer, int offset, int count) => Write(buffer.AsSpan(offset, count));
+
+            public override void Write(ReadOnlySpan<byte> buffer)
             {
-                for (int x = 0; x < w; x++)
+                while (!buffer.IsEmpty)
                 {
-                    uint p = pixels[y * w + x];
-                    a = (a + (p & 0xFF)) % MOD;
-                    b = (b + a) % MOD;
-                    a = (a + ((p >> 8) & 0xFF)) % MOD;
-                    b = (b + a) % MOD;
-                    a = (a + ((p >> 16) & 0xFF)) % MOD;
-                    b = (b + a) % MOD;
-                    a = (a + ((p >> 24) & 0xFF)) % MOD;
-                    b = (b + a) % MOD;
+                    int length = Math.Min(BufferSize - _count, buffer.Length);
+                    buffer[..length].CopyTo(_buffer.AsSpan(_count));
+                    _count += length;
+                    buffer = buffer[length..];
+                    if (_count == BufferSize) FlushChunk();
                 }
             }
-            return (b << 16) | a;
+
+            public override void Flush() => FlushChunk();
+            private void FlushChunk()
+            {
+                if (_count == 0) return;
+                int length = _count;
+                WriteChunk(_writer, "IDAT", writer => writer.Write(_buffer, 0, length));
+                _count = 0;
+            }
+
+            protected override void Dispose(bool disposing)
+            {
+                if (!_disposed)
+                {
+                    if (disposing) FlushChunk();
+                    ArrayPool<byte>.Shared.Return(_buffer);
+                    _disposed = true;
+                }
+                base.Dispose(disposing);
+            }
+
+            public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+            public override void SetLength(long value) => throw new NotSupportedException();
         }
 
         private static uint Crc32Stream(Stream stream, long start, int length)

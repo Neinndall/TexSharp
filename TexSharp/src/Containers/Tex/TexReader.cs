@@ -86,43 +86,32 @@ namespace TexSharp.Containers.Tex
                 ? BcImageDecoder.ComputeMipLevels(Width, Height)
                 : 1;
 
-            // Construir tamaños de cada mip (índice 0 = mayor).
-            var sizes = new int[maxLevels];
-            int w = Width;
-            int h = Height;
+            int total = 0;
             for (int i = 0; i < maxLevels; i++)
             {
-                sizes[i] = BcImageDecoder.MipSize(w, h, fmt);
-                w = Math.Max(1, w >> 1);
-                h = Math.Max(1, h >> 1);
+                int width = Math.Max(1, Width >> i);
+                int height = Math.Max(1, Height >> i);
+                total = checked(total + BcImageDecoder.MipSize(width, height, fmt));
             }
-
-            int total = 0;
-            for (int i = 0; i < maxLevels; i++) total = checked(total + sizes[i]);
 
             int dataLen = _fileData.Length - HeaderSize;
             int levelCount = maxLevels;
             while (levelCount > 1 && total > dataLen)
             {
                 levelCount--;
-                total -= sizes[levelCount];
+                int width = Math.Max(1, Width >> levelCount);
+                int height = Math.Max(1, Height >> levelCount);
+                total -= BcImageDecoder.MipSize(width, height, fmt);
             }
 
             _mips = new MipInfo[levelCount];
-            int[] mipW = new int[levelCount];
-            int[] mipH = new int[levelCount];
-            int cw = Width, ch = Height;
-            for (int i = 0; i < levelCount; i++)
-            {
-                mipW[i] = cw; mipH[i] = ch;
-                cw = Math.Max(1, cw >> 1);
-                ch = Math.Max(1, ch >> 1);
-            }
             int offset = 0;
             for (int i = levelCount - 1; i >= 0; i--)
             {
-                _mips[i] = new MipInfo { Offset = offset, Width = mipW[i], Height = mipH[i] };
-                offset += sizes[i];
+                int width = Math.Max(1, Width >> i);
+                int height = Math.Max(1, Height >> i);
+                _mips[i] = new MipInfo { Offset = offset, Width = width, Height = height };
+                offset += BcImageDecoder.MipSize(width, height, fmt);
             }
             MipLevels = levelCount;
         }

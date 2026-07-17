@@ -4,8 +4,10 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
+#if BCN_ENCODER_AVAILABLE
 using BCnEncoder.Decoder;
 using BCnEncoder.Shared;
+#endif
 using TexSharp.Formats;
 using TexSharp.Formats.BC;
 using TexSharp.Containers.Tex;
@@ -91,8 +93,103 @@ namespace TexSharp.Tests
             TestTexMipmaps();
             TestDdsMipmaps();
             TestDdsUncompressedChannels();
+            TestDdsSnormChannels();
             TestContainerValidation();
             TestImageEdgeDimensions();
+            TestVersionedGoldenCorpus();
+            TestStreamingPngExport();
+        }
+
+        static void TestStreamingPngExport()
+        {
+            const int width = 257;
+            const int height = 129;
+            uint[] pixels = new uint[width * height];
+            for (int i = 0; i < pixels.Length; i++)
+                pixels[i] = (uint)(i * 2654435761u) | 0xFF000000u;
+
+            string path = Path.Combine(Path.GetTempPath(), $"texsharp-{Guid.NewGuid():N}.png");
+            try
+            {
+                TextureExporter.SaveToPng(pixels, width, height, path);
+                byte[] png = File.ReadAllBytes(path);
+                using var compressed = new MemoryStream();
+                int offset = 8;
+                int idatChunks = 0;
+                while (offset + 12 <= png.Length)
+                {
+                    int length = System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(png.AsSpan(offset, 4));
+                    string type = System.Text.Encoding.ASCII.GetString(png, offset + 4, 4);
+                    if (type == "IDAT")
+                    {
+                        compressed.Write(png, offset + 8, length);
+                        idatChunks++;
+                    }
+                    offset += 12 + length;
+                }
+
+                compressed.Position = 0;
+                using var zlib = new System.IO.Compression.ZLibStream(compressed, System.IO.Compression.CompressionMode.Decompress);
+                using var raw = new MemoryStream();
+                zlib.CopyTo(raw);
+                Check("PNG streaming IDAT round-trip", idatChunks > 1 && raw.Length == (long)(width * 4 + 1) * height);
+            }
+            finally
+            {
+                File.Delete(path);
+            }
+        }
+
+        static void TestDdsSnormChannels()
+        {
+            byte[] bc4Block = { 0x81, 0x7F, 0, 0, 0, 0, 0, 0 };
+            uint bc4Pixel = new DdsReader(CreateDx10Dds(81, bc4Block)).Decode()[0];
+            Check("DDS BC4 SNORM maps -1 to zero", bc4Pixel == 0xFF000000u);
+
+            byte[] bc5Block =
+            {
+                0x7F, 0x81, 0, 0, 0, 0, 0, 0,
+                0x81, 0x7F, 0, 0, 0, 0, 0, 0
+            };
+            uint bc5Pixel = new DdsReader(CreateDx10Dds(84, bc5Block)).Decode()[0];
+            Check("DDS BC5 SNORM preserves signed channel extremes", bc5Pixel == 0xFF0000FFu);
+
+            byte[] fractionalBlock = { 0x9C, 0x33, 0x02, 0, 0, 0, 0, 0 };
+            Span<uint> fractionalOutput = stackalloc uint[16];
+            Bc4SnormBlock.DecodeBlock(fractionalBlock, fractionalOutput);
+            Check("BC4 SNORM preserves fractional interpolation", (fractionalOutput[0] & 0xFF) == 57);
+        }
+
+        static void TestVersionedGoldenCorpus()
+        {
+            string path = Path.Combine(AppContext.BaseDirectory, "Corpus", "golden.json");
+            GoldenCorpusCase[]? cases = JsonSerializer.Deserialize<GoldenCorpusCase[]>(File.ReadAllText(path));
+            if (cases is null || cases.Length == 0)
+            {
+                Check("Versioned golden corpus is available", false);
+                return;
+            }
+
+            foreach (GoldenCorpusCase testCase in cases)
+            {
+                byte[] data = Convert.FromHexString(testCase.DataHex);
+                uint[] pixels = testCase.Container switch
+                {
+                    "tex" => new TexReader(data).Decode(),
+                    "dds" => new DdsReader(data).Decode(),
+                    _ => throw new InvalidDataException($"Unknown corpus container: {testCase.Container}")
+                };
+
+                Check($"Golden corpus: {testCase.Name}", ComputeHash(pixels) == testCase.Sha256);
+            }
+        }
+
+        sealed class GoldenCorpusCase
+        {
+            public string Name { get; set; } = "";
+            public string Container { get; set; } = "";
+            public string DataHex { get; set; } = "";
+            public string Sha256 { get; set; } = "";
         }
 
         static void Finish()
@@ -478,6 +575,7 @@ namespace TexSharp.Tests
                 return new DdsReader(data).DecodeMip(0);
         }
 
+#if BCN_ENCODER_AVAILABLE
         static byte[] ExtractBaseMipData(byte[] raw, out int w, out int h, out CompressionFormat cf)
         {
             w = BitConverter.ToUInt16(raw, 4);
@@ -520,6 +618,7 @@ namespace TexSharp.Tests
             }
             return compressed;
         }
+#endif
 
         static string ComputeHash(uint[] pixels)
         {
@@ -678,6 +777,7 @@ namespace TexSharp.Tests
 
         static void CompareDetailed()
         {
+#if BCN_ENCODER_AVAILABLE
             var files = GetSampleFiles(GetSamplesPath());
             if (files.Count == 0) return;
 
@@ -741,26 +841,35 @@ namespace TexSharp.Tests
             Console.WriteLine($"Within ±1:    {within1} ({100.0 * within1 / totalPixels:F2}%)");
             Console.WriteLine($"Beyond ±1:    {beyond1} ({100.0 * beyond1 / totalPixels:F2}%)");
             Console.WriteLine($"Max diff R={maxDiffR} G={maxDiffG} B={maxDiffB} A={maxDiffA}");
+#else
+            Console.Error.WriteLine("[UNAVAILABLE] BCnEncoder comparison was not compiled. " +
+                "Build with -p:BcnEncoderPath=<path-to-BCnEncoder.dll> to enable --compare.");
+            Environment.ExitCode = 2;
+#endif
         }
 
         static void Benchmark(string? corpusPath)
         {
             Console.WriteLine("--- TexSharp decode-core benchmark ---");
             Console.WriteLine("I/O, container parsing and output allocations are excluded from these measurements.");
+            Console.WriteLine("Each case is warmed up and calibrated to run for at least 500 ms.");
 
-            BenchmarkDecodeCore(DecodedFormat.Bc1, "BC1", 1024, 1024, 32);
-            BenchmarkDecodeCore(DecodedFormat.Bc2, "BC2", 1024, 1024, 16);
-            BenchmarkDecodeCore(DecodedFormat.Bc3, "BC3", 1024, 1024, 16);
-            BenchmarkDecodeCore(DecodedFormat.Bc4, "BC4", 1024, 1024, 24);
-            BenchmarkDecodeCore(DecodedFormat.Bc5, "BC5", 1024, 1024, 16);
-            BenchmarkDecodeCore(DecodedFormat.Bc7, "BC7", 1024, 1024, 8);
+            foreach (int size in new[] { 256, 1024 })
+            {
+                BenchmarkDecodeCore(DecodedFormat.Bc1, "BC1", size, size);
+                BenchmarkDecodeCore(DecodedFormat.Bc2, "BC2", size, size);
+                BenchmarkDecodeCore(DecodedFormat.Bc3, "BC3", size, size);
+                BenchmarkDecodeCore(DecodedFormat.Bc4, "BC4", size, size);
+                BenchmarkDecodeCore(DecodedFormat.Bc5, "BC5", size, size);
+                BenchmarkDecodeCore(DecodedFormat.Bc7, "BC7", size, size);
+            }
 
             string path = corpusPath ?? GetSamplesPath();
             if (Directory.Exists(path))
                 BenchmarkContainerPipeline(path);
         }
 
-        static void BenchmarkDecodeCore(DecodedFormat format, string name, int width, int height, int iterations)
+        static void BenchmarkDecodeCore(DecodedFormat format, string name, int width, int height)
         {
             byte[] data = new byte[BcImageDecoder.MipSize(width, height, format)];
             for (int i = 0; i < data.Length; i++) data[i] = (byte)(i * 149 + 37);
@@ -769,6 +878,25 @@ namespace TexSharp.Tests
             for (int i = 0; i < 3; i++)
                 BcImageDecoder.DecodeImage(data, width, height, format, output);
 
+            int iterations = 1;
+            TimeSpan calibration;
+            do
+            {
+                var calibrationTimer = Stopwatch.StartNew();
+                for (int i = 0; i < iterations; i++)
+                    BcImageDecoder.DecodeImage(data, width, height, format, output);
+                calibrationTimer.Stop();
+                calibration = calibrationTimer.Elapsed;
+                if (calibration.TotalMilliseconds < 250) iterations *= 2;
+            }
+            while (calibration.TotalMilliseconds < 250);
+
+            iterations = Math.Max(iterations, (int)Math.Ceiling(iterations * 500 / calibration.TotalMilliseconds));
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+
+            long allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
             uint checksum = 0;
             var timer = Stopwatch.StartNew();
             for (int i = 0; i < iterations; i++)
@@ -777,9 +905,14 @@ namespace TexSharp.Tests
                 checksum ^= output[(i * 4099) & (output.Length - 1)];
             }
             timer.Stop();
+            long allocated = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
 
-            double megabytes = (double)width * height * sizeof(uint) * iterations / (1024 * 1024);
-            Console.WriteLine($"{name,-4} {megabytes / timer.Elapsed.TotalSeconds,8:F1} MB/s  {timer.Elapsed.TotalMilliseconds,8:F1} ms  checksum={checksum:X8}");
+            double inputMiB = (double)data.Length * iterations / (1024 * 1024);
+            double outputMiB = (double)width * height * sizeof(uint) * iterations / (1024 * 1024);
+            double allocatedPerOperation = (double)allocated / iterations;
+            Console.WriteLine($"{name,-4} {width,4}x{height,-4}  in={inputMiB / timer.Elapsed.TotalSeconds,8:F1} MiB/s" +
+                $"  out={outputMiB / timer.Elapsed.TotalSeconds,8:F1} MiB/s" +
+                $"  alloc={allocatedPerOperation,6:F1} B/op  n={iterations,5}  checksum={checksum:X8}");
         }
 
         static void BenchmarkContainerPipeline(string corpusPath)

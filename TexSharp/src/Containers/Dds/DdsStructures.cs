@@ -51,6 +51,8 @@ namespace TexSharp.Containers.Dds
         Bc5,
         Bc7,
         Rgba8,
-        Bgra8
+        Bgra8,
+        Bc4Snorm,
+        Bc5Snorm
     }
 }

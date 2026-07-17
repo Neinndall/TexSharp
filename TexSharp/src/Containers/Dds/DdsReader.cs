@@ -65,6 +65,8 @@ namespace TexSharp.Containers.Dds
             DdsFormat.Bc4 => DecodedFormat.Bc4,
             DdsFormat.Bc5 => DecodedFormat.Bc5,
             DdsFormat.Bc7 => DecodedFormat.Bc7,
+            DdsFormat.Bc4Snorm => DecodedFormat.Bc4Snorm,
+            DdsFormat.Bc5Snorm => DecodedFormat.Bc5Snorm,
             DdsFormat.Rgba8 => DecodedFormat.Rgba8,
             DdsFormat.Bgra8 => DecodedFormat.DdsBgra8,
             _ => throw new NotSupportedException($"Unsupported DDS format: {Format}.")
@@ -84,35 +86,32 @@ namespace TexSharp.Containers.Dds
             int declared = (int)Header.MipMapCount;
             int maxLevels = declared > 0 ? declared : 1;
 
-            var sizes = new int[maxLevels];
-            int cw = w, ch = h;
+            int total = 0;
             for (int i = 0; i < maxLevels; i++)
             {
-                sizes[i] = BcImageDecoder.MipSize(cw, ch, fmt);
-                cw = Math.Max(1, cw >> 1);
-                ch = Math.Max(1, ch >> 1);
+                int width = Math.Max(1, w >> i);
+                int height = Math.Max(1, h >> i);
+                total = checked(total + BcImageDecoder.MipSize(width, height, fmt));
             }
-
-            int total = 0;
-            for (int i = 0; i < maxLevels; i++) total = checked(total + sizes[i]);
 
             int dataLen = _fileData.Length - _headerSize;
             int levelCount = maxLevels;
             while (levelCount > 1 && total > dataLen)
             {
                 levelCount--;
-                total -= sizes[levelCount];
+                int width = Math.Max(1, w >> levelCount);
+                int height = Math.Max(1, h >> levelCount);
+                total -= BcImageDecoder.MipSize(width, height, fmt);
             }
 
             _mips = new MipInfo[levelCount];
             int offset = 0; // DDS: mip mayor primero.
-            cw = w; ch = h;
             for (int i = 0; i < levelCount; i++)
             {
-                _mips[i] = new MipInfo { Offset = offset, Width = cw, Height = ch };
-                offset += sizes[i];
-                cw = Math.Max(1, cw >> 1);
-                ch = Math.Max(1, ch >> 1);
+                int width = Math.Max(1, w >> i);
+                int height = Math.Max(1, h >> i);
+                _mips[i] = new MipInfo { Offset = offset, Width = width, Height = height };
+                offset += BcImageDecoder.MipSize(width, height, fmt);
             }
             MipLevels = levelCount;
         }
@@ -126,8 +125,10 @@ namespace TexSharp.Containers.Dds
                     71 or 72 => DdsFormat.Bc1,   // BC1 UNORM / SRGB
                     74 or 75 => DdsFormat.Bc2,   // BC2 UNORM / SRGB
                     77 or 78 => DdsFormat.Bc3,   // BC3 UNORM / SRGB
-                    80 or 81 => DdsFormat.Bc4,   // BC4 UNORM / SNORM
-                    83 or 84 => DdsFormat.Bc5,   // BC5 UNORM / SNORM
+                    80 => DdsFormat.Bc4,
+                    81 => DdsFormat.Bc4Snorm,
+                    83 => DdsFormat.Bc5,
+                    84 => DdsFormat.Bc5Snorm,
                     98 or 99 => DdsFormat.Bc7,   // BC7 UNORM / SRGB
                     28 => DdsFormat.Rgba8,       // R8G8B8A8 UNORM
                     87 => DdsFormat.Bgra8,       // B8G8R8A8 UNORM
@@ -142,11 +143,11 @@ namespace TexSharp.Containers.Dds
                 if (fourCC == DdsPixelFormat.MakeFourCC('D', 'X', 'T', '3')) return DdsFormat.Bc2;
                 if (fourCC == DdsPixelFormat.MakeFourCC('D', 'X', 'T', '5')) return DdsFormat.Bc3;
                 if (fourCC == DdsPixelFormat.MakeFourCC('A', 'T', 'I', '1')) return DdsFormat.Bc4;
-                if (fourCC == DdsPixelFormat.MakeFourCC('B', 'C', '4', 'U') ||
-                    fourCC == DdsPixelFormat.MakeFourCC('B', 'C', '4', 'S')) return DdsFormat.Bc4;
+                if (fourCC == DdsPixelFormat.MakeFourCC('B', 'C', '4', 'U')) return DdsFormat.Bc4;
+                if (fourCC == DdsPixelFormat.MakeFourCC('B', 'C', '4', 'S')) return DdsFormat.Bc4Snorm;
                 if (fourCC == DdsPixelFormat.MakeFourCC('A', 'T', 'I', '2')) return DdsFormat.Bc5;
-                if (fourCC == DdsPixelFormat.MakeFourCC('B', 'C', '5', 'U') ||
-                    fourCC == DdsPixelFormat.MakeFourCC('B', 'C', '5', 'S')) return DdsFormat.Bc5;
+                if (fourCC == DdsPixelFormat.MakeFourCC('B', 'C', '5', 'U')) return DdsFormat.Bc5;
+                if (fourCC == DdsPixelFormat.MakeFourCC('B', 'C', '5', 'S')) return DdsFormat.Bc5Snorm;
                 if (fourCC == DdsPixelFormat.MakeFourCC('B', 'C', '7', ' ')) return DdsFormat.Bc7;
             }
             return DdsFormat.Unknown;

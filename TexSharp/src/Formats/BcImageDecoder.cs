@@ -16,7 +16,9 @@ namespace TexSharp.Formats
         Bgra8,
         Rgba16f,
         Rgba8,
-        DdsBgra8
+        DdsBgra8,
+        Bc4Snorm,
+        Bc5Snorm
     }
 
     public enum Rgba16fColorMapping
@@ -31,8 +33,8 @@ namespace TexSharp.Formats
         {
             return format switch
             {
-                DecodedFormat.Bc1 or DecodedFormat.Bc4 => 8,
-                DecodedFormat.Bc2 or DecodedFormat.Bc3 or DecodedFormat.Bc5 or DecodedFormat.Bc7 => 16,
+                DecodedFormat.Bc1 or DecodedFormat.Bc4 or DecodedFormat.Bc4Snorm => 8,
+                DecodedFormat.Bc2 or DecodedFormat.Bc3 or DecodedFormat.Bc5 or DecodedFormat.Bc5Snorm or DecodedFormat.Bc7 => 16,
                 DecodedFormat.Bgra8 => 0,
                 DecodedFormat.Rgba16f => 0,
                 DecodedFormat.Rgba8 => 0,
@@ -81,7 +83,24 @@ namespace TexSharp.Formats
                 case DecodedFormat.Bc2: DecodeGeneric(data, output, width, height, blocksX, blocksY, 16, aligned, Bc2Block.DecodeBlock); return;
                 case DecodedFormat.Bc4: DecodeGeneric(data, output, width, height, blocksX, blocksY, 8, aligned, Bc4Block.DecodeBlock); return;
                 case DecodedFormat.Bc5: DecodeGeneric(data, output, width, height, blocksX, blocksY, 16, aligned, Bc5Block.DecodeBlock); return;
-                case DecodedFormat.Bc7: DecodeGeneric(data, output, width, height, blocksX, blocksY, 16, aligned, Bc7Block.DecodeBlock); return;
+                case DecodedFormat.Bc4Snorm: DecodeGeneric(data, output, width, height, blocksX, blocksY, 8, aligned, Bc4SnormBlock.DecodeBlock); return;
+                case DecodedFormat.Bc5Snorm: DecodeGeneric(data, output, width, height, blocksX, blocksY, 16, aligned, Bc5SnormBlock.DecodeBlock); return;
+                case DecodedFormat.Bc7: DecodeBc7(data, output, width, height, blocksX, blocksY, aligned); return;
+            }
+        }
+
+        private static void DecodeBc7(ReadOnlySpan<byte> data, Span<uint> output,
+            int width, int height, int blocksX, int blocksY, bool aligned)
+        {
+            Span<uint> block = stackalloc uint[16];
+            for (int y = 0; y < blocksY; y++)
+            {
+                for (int x = 0; x < blocksX; x++)
+                {
+                    int offset = (y * blocksX + x) << 4;
+                    Bc7Block.DecodeBlock(data.Slice(offset, 16), block);
+                    WriteBlock(output, width, y, x, block, aligned, height);
+                }
             }
         }
 

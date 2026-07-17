@@ -7,9 +7,14 @@
     <Version>1.0.0-beta.2</Version>
     <Title>TexSharp</Title>
     <Authors>Neinndall</Authors>
-    <Description>A ultra-high performance texture encoding and decoding library for .NET 10. Specially optimized for Block Compression (BC1-BC7) and game asset formats like .tex and .dds.</Description>
+    <Description>An ultra-high performance texture decoding library for .NET 10, optimized for Block Compression (BC1-BC7) and game asset formats such as .tex and .dds.</Description>
     <PackageProjectUrl>https://github.com/Neinndall/TexSharp</PackageProjectUrl>
     <RepositoryUrl>https://github.com/Neinndall/TexSharp</RepositoryUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
 
 </Project>
