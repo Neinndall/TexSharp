@@ -7,6 +7,7 @@ Ultra-high performance texture decoding library for .NET 10, with native PNG exp
 - **Decode** .tex and .dds to raw RGBA pixels into caller-provided `Span<uint>` buffers or convenience arrays
 - **Export to PNG** directly, no ImageSharp or any external library needed
 - **Mipmap support** — read any level, or all levels
+- **Zero-allocation inspection** — identify TEX/DDS metadata and encrypted Riot TEX without decoding
 - **No hot-loop allocations** — block decoders use spans and stack buffers
 - **Specialized image paths** — BC2/BC4/BC5 avoid delegate dispatch, while BC4/BC5 write decoded channels directly to the destination image
 - **Reproducible** — calibrated per-format benchmarks and versioned golden fixtures
@@ -27,6 +28,18 @@ using TexSharp;
 
 TextureExporter.SaveToPng("texture.tex", "output.png");
 ```
+
+Inspect an in-memory header without decoding pixels or allocating managed memory:
+
+```csharp
+TextureInspectionStatus status = TextureInspector.Inspect(data, out TextureInfo info);
+if (status == TextureInspectionStatus.Success)
+    Console.WriteLine($"{info.Container} {info.Format} {info.Width}x{info.Height}, {info.MipLevels} mips");
+```
+
+`TextureInfo.IsDataComplete` indicates whether the complete declared or inferred mip chain is present.
+Encrypted Riot TEX returns `TextureInspectionStatus.Encrypted`; malformed and unsupported inputs use
+distinct enum values, so callers do not need exceptions or error strings in the inspection path.
 
 ## Validation
 

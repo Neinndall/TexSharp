@@ -97,6 +97,7 @@ namespace TexSharp.Tests
             TestDdsUncompressedChannels();
             TestDdsSnormChannels();
             TestContainerValidation();
+            TestTextureInspection();
             TestImageEdgeDimensions();
             TestVersionedGoldenCorpus();
             TestStreamingPngExport();
@@ -517,6 +518,72 @@ namespace TexSharp.Tests
             try { _ = new DdsReader(excessiveMips); }
             catch (ArgumentException) { excessiveMipsRejected = true; }
             Check("DDS excessive mip count is rejected", excessiveMipsRejected);
+        }
+
+        static void TestTextureInspection()
+        {
+            byte[] tex = new byte[28];
+            tex[0] = 0x54; tex[1] = 0x45; tex[2] = 0x58;
+            BitConverter.GetBytes((ushort)4).CopyTo(tex, 4);
+            BitConverter.GetBytes((ushort)4).CopyTo(tex, 6);
+            tex[9] = 10;
+            tex[11] = 1;
+            TextureInspectionStatus texStatus = TextureInspector.Inspect(tex, out TextureInfo texInfo);
+            Check("Inspector reads TEX metadata", texStatus == TextureInspectionStatus.Success &&
+                texInfo.Container == TextureContainer.Tex && texInfo.Format == TexturePixelFormat.Bc1 &&
+                texInfo.Width == 4 && texInfo.Height == 4 && texInfo.MipLevels == 2 && !texInfo.IsDataComplete);
+
+            byte[] dds = CreateDdsHeader(8, 4, 1, DdsPixelFormat.MakeFourCC('D', 'X', 'T', '5'));
+            Array.Resize(ref dds, 160);
+            TextureInspectionStatus ddsStatus = TextureInspector.Inspect(dds, out TextureInfo ddsInfo);
+            Check("Inspector reads DDS metadata", ddsStatus == TextureInspectionStatus.Success &&
+                ddsInfo.Container == TextureContainer.Dds && ddsInfo.Format == TexturePixelFormat.Bc3 &&
+                ddsInfo.Width == 8 && ddsInfo.Height == 4 && ddsInfo.MipLevels == 1 && ddsInfo.IsDataComplete);
+
+            byte[] encrypted = { 0xC9, 0xE3, 0x44, 0x26 };
+            Check("Inspector identifies encrypted Riot TEX",
+                TextureInspector.Inspect(encrypted, out TextureInfo encryptedInfo) == TextureInspectionStatus.Encrypted &&
+                encryptedInfo.Container == TextureContainer.Tex);
+
+            tex[9] = 0xFF;
+            TextureInspectionStatus unsupported = TextureInspector.Inspect(tex, out TextureInfo unsupportedInfo);
+            Check("Inspector preserves unsupported TEX metadata", unsupported == TextureInspectionStatus.UnsupportedFormat &&
+                unsupportedInfo.Container == TextureContainer.Tex && unsupportedInfo.Width == 4);
+            Check("Inspector rejects truncated data",
+                TextureInspector.Inspect(new byte[3], out _) == TextureInspectionStatus.InvalidData);
+
+            (uint Dxgi, TexturePixelFormat Format)[] dxgiFormats =
+            {
+                (71, TexturePixelFormat.Bc1), (74, TexturePixelFormat.Bc2),
+                (77, TexturePixelFormat.Bc3), (80, TexturePixelFormat.Bc4),
+                (81, TexturePixelFormat.Bc4Snorm), (83, TexturePixelFormat.Bc5),
+                (84, TexturePixelFormat.Bc5Snorm), (98, TexturePixelFormat.Bc7),
+                (28, TexturePixelFormat.Rgba8), (87, TexturePixelFormat.Bgra8)
+            };
+            bool allDxgiFormatsMatch = true;
+            foreach ((uint dxgi, TexturePixelFormat expected) in dxgiFormats)
+            {
+                byte[] sample = CreateDx10Dds(dxgi, new byte[64]);
+                if (TextureInspector.Inspect(sample, out TextureInfo sampleInfo) != TextureInspectionStatus.Success ||
+                    sampleInfo.Format != expected)
+                    allDxgiFormatsMatch = false;
+            }
+            Check("Inspector maps all supported DDS DXGI formats", allDxgiFormatsMatch);
+
+            byte[] hostileDds = CreateDdsHeader(int.MaxValue, int.MaxValue, 1,
+                DdsPixelFormat.MakeFourCC('D', 'X', 'T', '1'));
+            bool hostileDidNotThrow = true;
+            try { _ = TextureInspector.Inspect(hostileDds, out _); }
+            catch { hostileDidNotThrow = false; }
+            Check("Inspector handles extreme dimensions without exceptions", hostileDidNotThrow);
+
+            tex[9] = 10;
+            _ = TextureInspector.Inspect(tex, out _);
+            long allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+            for (int i = 0; i < 1_000; i++)
+                _ = TextureInspector.Inspect(tex, out _);
+            long allocated = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+            Check("Inspector allocates zero bytes", allocated == 0);
         }
 
         static void TestImageEdgeDimensions()
