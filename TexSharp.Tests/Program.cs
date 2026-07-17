@@ -35,7 +35,9 @@ namespace TexSharp.Tests
                 }
                 if (args[0] == "--compare")
                 {
-                    CompareDetailed();
+                    string? corpusPath = args.Length > 1 ? args[1] : null;
+                    int maxFiles = args.Length > 2 && int.TryParse(args[2], out int parsedLimit) ? parsedLimit : 100;
+                    CompareDetailed(corpusPath, maxFiles);
                     return;
                 }
                 if (args[0] == "--png")
@@ -603,20 +605,27 @@ namespace TexSharp.Tests
         }
 
 #if BCN_ENCODER_AVAILABLE
-        static byte[] ExtractBaseMipData(byte[] raw, out int w, out int h, out CompressionFormat cf)
+        static byte[] ExtractBaseMipData(string file, byte[] raw, out int w, out int h, out CompressionFormat cf,
+            out DecodedFormat decodedFormat, out string formatName)
         {
+            if (file.EndsWith(".dds", StringComparison.OrdinalIgnoreCase))
+                return ExtractDdsBaseMipData(raw, out w, out h, out cf, out decodedFormat, out formatName);
+
+            if (raw.AsSpan().StartsWith(new byte[] { 0xC9, 0xE3, 0x44, 0x26 }))
+                throw new NotSupportedException("Encrypted Riot TEX.");
+
             w = BitConverter.ToUInt16(raw, 4);
             h = BitConverter.ToUInt16(raw, 6);
             byte fmt = raw[9];
             int headerSize = 12;
 
-            cf = fmt switch
+            (cf, decodedFormat, formatName) = fmt switch
             {
-                10 or 11 => CompressionFormat.Bc1WithAlpha,
-                12 => CompressionFormat.Bc3,
-                13 => CompressionFormat.Bc7,
-                14 => CompressionFormat.Bc5,
-                20 => CompressionFormat.Bgra,
+                10 or 11 => (CompressionFormat.Bc1WithAlpha, DecodedFormat.Bc1, "BC1"),
+                12 => (CompressionFormat.Bc3, DecodedFormat.Bc3, "BC3"),
+                13 => (CompressionFormat.Bc7, DecodedFormat.Bc7, "BC7"),
+                14 => (CompressionFormat.Bc5, DecodedFormat.Bc5, "BC5"),
+                20 => (CompressionFormat.Bgra, DecodedFormat.Bgra8, "BGRA8"),
                 _ => throw new NotSupportedException($"Format {fmt}")
             };
 
@@ -644,6 +653,63 @@ namespace TexSharp.Tests
                 return baseMip;
             }
             return compressed;
+        }
+
+        static byte[] ExtractDdsBaseMipData(byte[] raw, out int w, out int h, out CompressionFormat cf,
+            out DecodedFormat decodedFormat, out string formatName)
+        {
+            if (raw.Length < 128 || BitConverter.ToUInt32(raw, 0) != 0x20534444)
+                throw new InvalidDataException("Invalid DDS header.");
+
+            w = checked((int)BitConverter.ToUInt32(raw, 16));
+            h = checked((int)BitConverter.ToUInt32(raw, 12));
+            uint fourCc = BitConverter.ToUInt32(raw, 84);
+            int headerSize = 128;
+
+            if (fourCc == DdsPixelFormat.MakeFourCC('D', 'X', '1', '0'))
+            {
+                if (raw.Length < 148) throw new InvalidDataException("Truncated DDS DX10 header.");
+                uint dxgi = BitConverter.ToUInt32(raw, 128);
+                headerSize = 148;
+                (cf, decodedFormat, formatName) = dxgi switch
+                {
+                    71 or 72 => (CompressionFormat.Bc1WithAlpha, DecodedFormat.Bc1, "BC1"),
+                    74 or 75 => (CompressionFormat.Bc2, DecodedFormat.Bc2, "BC2"),
+                    77 or 78 => (CompressionFormat.Bc3, DecodedFormat.Bc3, "BC3"),
+                    80 => (CompressionFormat.Bc4, DecodedFormat.Bc4, "BC4"),
+                    83 => (CompressionFormat.Bc5, DecodedFormat.Bc5, "BC5"),
+                    98 or 99 => (CompressionFormat.Bc7, DecodedFormat.Bc7, "BC7"),
+                    28 => (CompressionFormat.Rgba, DecodedFormat.Rgba8, "RGBA8"),
+                    87 => (CompressionFormat.Bgra, DecodedFormat.DdsBgra8, "BGRA8"),
+                    81 or 84 => throw new NotSupportedException("BC4/BC5 SNORM comparison is not equivalent."),
+                    _ => throw new NotSupportedException($"DXGI format {dxgi}")
+                };
+            }
+            else
+            {
+                (cf, decodedFormat, formatName) = fourCc switch
+                {
+                    var value when value == DdsPixelFormat.MakeFourCC('D', 'X', 'T', '1') => (CompressionFormat.Bc1WithAlpha, DecodedFormat.Bc1, "BC1"),
+                    var value when value == DdsPixelFormat.MakeFourCC('D', 'X', 'T', '3') => (CompressionFormat.Bc2, DecodedFormat.Bc2, "BC2"),
+                    var value when value == DdsPixelFormat.MakeFourCC('D', 'X', 'T', '5') => (CompressionFormat.Bc3, DecodedFormat.Bc3, "BC3"),
+                    var value when value == DdsPixelFormat.MakeFourCC('A', 'T', 'I', '1') => (CompressionFormat.Bc4, DecodedFormat.Bc4, "BC4"),
+                    var value when value == DdsPixelFormat.MakeFourCC('B', 'C', '4', 'U') => (CompressionFormat.Bc4, DecodedFormat.Bc4, "BC4"),
+                    var value when value == DdsPixelFormat.MakeFourCC('A', 'T', 'I', '2') => (CompressionFormat.Bc5, DecodedFormat.Bc5, "BC5"),
+                    var value when value == DdsPixelFormat.MakeFourCC('B', 'C', '5', 'U') => (CompressionFormat.Bc5, DecodedFormat.Bc5, "BC5"),
+                    _ => throw new NotSupportedException($"DDS FourCC 0x{fourCc:X8}")
+                };
+            }
+
+            int blockLength = cf is CompressionFormat.Rgba or CompressionFormat.Bgra ? 1 : 4;
+            int blockSize = cf switch
+            {
+                CompressionFormat.Bc1WithAlpha or CompressionFormat.Bc4 => 8,
+                CompressionFormat.Rgba or CompressionFormat.Bgra => 4,
+                _ => 16
+            };
+            int size = ((w + blockLength - 1) / blockLength) * ((h + blockLength - 1) / blockLength) * blockSize;
+            if (raw.Length - headerSize < size) throw new InvalidDataException("DDS base mip is truncated.");
+            return raw.AsSpan(headerSize, size).ToArray();
         }
 #endif
 
@@ -802,36 +868,86 @@ namespace TexSharp.Tests
         }
 
 
-        static void CompareDetailed()
+        static void CompareDetailed(string? corpusPath, int maxFiles)
         {
 #if BCN_ENCODER_AVAILABLE
-            var files = GetSampleFiles(GetSamplesPath());
-            if (files.Count == 0) return;
+            string path = corpusPath ?? GetSamplesPath();
+            var files = GetSampleFiles(path);
+            if (files.Count == 0)
+            {
+                Console.Error.WriteLine($"[UNAVAILABLE] No TEX or DDS files found in: {path}");
+                Environment.ExitCode = 2;
+                return;
+            }
+            if (maxFiles < 0)
+            {
+                Console.Error.WriteLine("[INVALID] max-files must be zero (all files) or a positive number.");
+                Environment.ExitCode = 2;
+                return;
+            }
 
             var bcn = new BcDecoder();
-            int maxFiles = Math.Min(100, files.Count);
-            int totalPixels = 0, exactMatch = 0, within1 = 0, beyond1 = 0;
+            int filesToCompare = maxFiles == 0 ? files.Count : Math.Min(maxFiles, files.Count);
+            long totalPixels = 0, exactMatch = 0, within1 = 0, beyond1 = 0;
             int maxDiffR = 0, maxDiffG = 0, maxDiffB = 0, maxDiffA = 0;
+            int comparedFiles = 0, skippedFiles = 0, failedFiles = 0;
+            var formats = new Dictionary<string, ComparisonStats>(StringComparer.Ordinal);
 
-            for (int fi = 0; fi < maxFiles; fi++)
+            Console.WriteLine("--- TexSharp vs BCnEncoder ---");
+            Console.WriteLine($"Corpus: {Path.GetFullPath(path)}");
+            Console.WriteLine($"Files:  {filesToCompare}/{files.Count}");
+
+            for (int fi = 0; fi < filesToCompare; fi++)
             {
-                var file = files[fi];
+                string file = files[fi];
                 try
                 {
                     byte[] raw = File.ReadAllBytes(file);
-                    byte[] baseMip = ExtractBaseMipData(raw, out int w, out int h, out CompressionFormat cf);
+                    byte[] baseMip = ExtractBaseMipData(file, raw, out int w, out int h, out CompressionFormat cf,
+                        out DecodedFormat decodedFormat, out string formatName);
 
-                    // TexSharp
-                    uint[] tsPixels = DecodeSampleFile(file);
+                    if (!formats.TryGetValue(formatName, out ComparisonStats? stats))
+                        formats.Add(formatName, stats = new ComparisonStats());
 
-                    // BCnEncoder
-                    ColorRgba32[] bcnResult;
-                    if (cf == CompressionFormat.Bgra)
-                        bcnResult = MemoryMarshal.Cast<byte, ColorRgba32>(baseMip.AsSpan()).ToArray();
+                    uint[] tsPixels = new uint[checked(w * h)];
+                    if (!stats.Warmed)
+                    {
+                        BcImageDecoder.DecodeImage(baseMip, w, h, decodedFormat, tsPixels);
+                        if (cf is not (CompressionFormat.Bgra or CompressionFormat.Rgba))
+                            _ = bcn.DecodeRaw(new Memory<byte>(baseMip), w, h, cf);
+                        stats.Warmed = true;
+                    }
+
+                    var parseTimer = Stopwatch.StartNew();
+                    if (file.EndsWith(".tex", StringComparison.OrdinalIgnoreCase))
+                        _ = new TexReader(raw);
                     else
-                        bcnResult = bcn.DecodeRaw(new Memory<byte>(baseMip), w, h, cf);
+                        _ = new DdsReader(raw);
+                    parseTimer.Stop();
+
+                    long tsAllocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+                    long tsStarted = Stopwatch.GetTimestamp();
+                    BcImageDecoder.DecodeImage(baseMip, w, h, decodedFormat, tsPixels);
+                    long tsTicks = Stopwatch.GetTimestamp() - tsStarted;
+                    long tsAllocated = GC.GetAllocatedBytesForCurrentThread() - tsAllocatedBefore;
+
+                    long bcnAllocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+                    long bcnStarted = Stopwatch.GetTimestamp();
+                    ColorRgba32[] bcnResult = cf is CompressionFormat.Bgra or CompressionFormat.Rgba
+                        ? MemoryMarshal.Cast<byte, ColorRgba32>(baseMip.AsSpan()).ToArray()
+                        : bcn.DecodeRaw(new Memory<byte>(baseMip), w, h, cf);
+                    long bcnTicks = Stopwatch.GetTimestamp() - bcnStarted;
+                    long bcnAllocated = GC.GetAllocatedBytesForCurrentThread() - bcnAllocatedBefore;
 
                     int pxCount = Math.Min(tsPixels.Length, bcnResult.Length);
+                    stats.Files++;
+                    stats.InputBytes += baseMip.Length;
+                    stats.ParseTicks += parseTimer.ElapsedTicks;
+                    stats.TexSharpTicks += tsTicks;
+                    stats.BcnTicks += bcnTicks;
+                    stats.TexSharpAllocated += tsAllocated;
+                    stats.BcnAllocated += bcnAllocated;
+
                     for (int i = 0; i < pxCount; i++)
                     {
                         totalPixels++;
@@ -841,39 +957,75 @@ namespace TexSharp.Tests
                         int dg = Math.Abs((int)((t >> 8) & 0xFF) - b.g);
                         int db = Math.Abs((int)((t >> 16) & 0xFF) - b.b);
                         int da = Math.Abs((int)((t >> 24) & 0xFF) - b.a);
-                        if (dr > maxDiffR) maxDiffR = dr;
-                        if (dg > maxDiffG) maxDiffG = dg;
-                        if (db > maxDiffB) maxDiffB = db;
-                        if (da > maxDiffA) maxDiffA = da;
-                        if (dr == 0 && dg == 0 && db == 0 && da == 0)
-                            exactMatch++;
-                        else if (dr <= 1 && dg <= 1 && db <= 1 && da <= 1)
-                            within1++;
-                        else
-                            beyond1++;
+                        maxDiffR = Math.Max(maxDiffR, dr);
+                        maxDiffG = Math.Max(maxDiffG, dg);
+                        maxDiffB = Math.Max(maxDiffB, db);
+                        maxDiffA = Math.Max(maxDiffA, da);
+                        if (dr == 0 && dg == 0 && db == 0 && da == 0) { exactMatch++; stats.Exact++; }
+                        else if (dr <= 1 && dg <= 1 && db <= 1 && da <= 1) { within1++; stats.Within1++; }
+                        else { beyond1++; stats.Beyond1++; }
                     }
 
-                    string name = Path.GetFileName(file);
-                    Console.WriteLine($"[{fi + 1}/{maxFiles}] {name} | px={pxCount} exact={exactMatch} ±1={within1} >1={beyond1}");
+                    comparedFiles++;
+                    if ((fi + 1) % 100 == 0 || fi + 1 == filesToCompare)
+                        Console.WriteLine($"[{fi + 1}/{filesToCompare}] compared={comparedFiles} skipped={skippedFiles} failed={failedFiles}");
+                }
+                catch (NotSupportedException ex)
+                {
+                    skippedFiles++;
+                    if (skippedFiles <= 10) Console.WriteLine($"[SKIP] {Path.GetFileName(file)} | {ex.Message}");
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"[{fi + 1}/{maxFiles}] {Path.GetFileName(file)} | ERROR: {ex.Message}");
+                    failedFiles++;
+                    Console.WriteLine($"[ERROR] {Path.GetFileName(file)} | {ex.Message}");
                 }
             }
 
-            Console.WriteLine($"\n--- COMPARISON SUMMARY (first {maxFiles} files) ---");
+            Console.WriteLine("\n--- PER-FORMAT PERFORMANCE ---");
+            Console.WriteLine("Format Files Input MiB Parse ms TexSharp MiB/s BCnEncoder MiB/s Ratio TS B/file BCn B/file");
+            foreach (var (format, stats) in formats.OrderBy(pair => pair.Key))
+            {
+                double inputMiB = stats.InputBytes / (1024.0 * 1024.0);
+                double tsRate = inputMiB / (stats.TexSharpTicks / (double)Stopwatch.Frequency);
+                double bcnRate = inputMiB / (stats.BcnTicks / (double)Stopwatch.Frequency);
+                double parseMs = stats.ParseTicks * 1000.0 / Stopwatch.Frequency;
+                Console.WriteLine($"{format,-7} {stats.Files,5} {inputMiB,9:F1} {parseMs,8:F1} {tsRate,14:F1} {bcnRate,16:F1} {tsRate / bcnRate,5:F2}x {stats.TexSharpAllocated / stats.Files,9} {stats.BcnAllocated / stats.Files,10}");
+            }
+
+            Console.WriteLine("\n--- PIXEL COMPARISON ---");
+            Console.WriteLine($"Files:        compared={comparedFiles} skipped={skippedFiles} failed={failedFiles}");
             Console.WriteLine($"Total pixels: {totalPixels}");
-            Console.WriteLine($"Exact match:  {exactMatch} ({100.0 * exactMatch / totalPixels:F2}%)");
-            Console.WriteLine($"Within ±1:    {within1} ({100.0 * within1 / totalPixels:F2}%)");
-            Console.WriteLine($"Beyond ±1:    {beyond1} ({100.0 * beyond1 / totalPixels:F2}%)");
+            Console.WriteLine($"Exact match:  {exactMatch} ({Percent(exactMatch, totalPixels):F2}%)");
+            Console.WriteLine($"Within +/-1:  {within1} ({Percent(within1, totalPixels):F2}%)");
+            Console.WriteLine($"Beyond +/-1:  {beyond1} ({Percent(beyond1, totalPixels):F2}%)");
             Console.WriteLine($"Max diff R={maxDiffR} G={maxDiffG} B={maxDiffB} A={maxDiffA}");
+            if (failedFiles > 0) Environment.ExitCode = 1;
 #else
             Console.Error.WriteLine("[UNAVAILABLE] BCnEncoder comparison was not compiled. " +
                 "Build with -p:BcnEncoderPath=<path-to-BCnEncoder.dll> to enable --compare.");
             Environment.ExitCode = 2;
 #endif
         }
+
+#if BCN_ENCODER_AVAILABLE
+        static double Percent(long value, long total) => total == 0 ? 0 : 100.0 * value / total;
+
+        sealed class ComparisonStats
+        {
+            public bool Warmed;
+            public int Files;
+            public long InputBytes;
+            public long ParseTicks;
+            public long TexSharpTicks;
+            public long BcnTicks;
+            public long TexSharpAllocated;
+            public long BcnAllocated;
+            public long Exact;
+            public long Within1;
+            public long Beyond1;
+        }
+#endif
 
         static void Benchmark(string? corpusPath)
         {

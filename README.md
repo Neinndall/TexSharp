@@ -44,8 +44,12 @@ when building or running the pixel comparison:
 
 ```console
 dotnet run --project TexSharp.Tests/TexSharp.Tests.csproj \
-  -p:BcnEncoderPath=/path/to/BCnEncoder.dll -- --compare
+  -p:BcnEncoderPath=/path/to/BCnEncoder.dll -- --compare /path/to/corpus 500
 ```
+
+The corpus path and maximum file count are optional; use `0` to process the entire corpus.
+The report separates TexSharp container parsing from decode-core throughput, reports allocations,
+groups results by BC format, and checks every output pixel with an explicit +/-1 tolerance.
 
 `--benchmark` reports calibrated decode-core input/output throughput and allocations for each
 BC format at 256×256 and 1024×1024. An optional corpus path adds an end-to-end container run.
